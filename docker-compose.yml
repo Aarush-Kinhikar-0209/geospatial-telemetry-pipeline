@@ -1,0 +1,102 @@
+# ---------------------------------------------------------------------------
+# Phase 1: Core Services Containerization
+# docker-compose orchestration for Redpanda (broker), ClickHouse (OLAP),
+# and Redis (state store) on a shared custom bridge network.
+#
+# Usage: docker compose up -d
+# ---------------------------------------------------------------------------
+
+services:
+  # -------------------------------------------------------------------------
+  # Message Broker: Redpanda (Kafka-compatible, C++, low memory footprint)
+  # Exposes Kafka API on port 9092.
+  # -------------------------------------------------------------------------
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: redpanda
+    command:
+      - redpanda
+      - start
+      - --smp
+      - "1"
+      - --memory
+      - 1G
+      - --reserve-memory
+      - "0M"
+      - --node-address
+      - 0.0.0.0
+      - --kafka-addr
+      - 0.0.0.0:9092
+      - --advertise-kafka-addr
+      - redpanda:9092
+    ports:
+      - "9092:9092"
+    networks:
+      - data-mesh
+    volumes:
+      - redpanda_data:/var/lib/redpanda
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster info > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+
+  # -------------------------------------------------------------------------
+  # OLAP Storage: ClickHouse (fast OLAP queries)
+  # HTTP: 8123, Native: 9000.
+  # -------------------------------------------------------------------------
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    networks:
+      - data-mesh
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./infrastructure/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  # -------------------------------------------------------------------------
+  # State Store: Redis (O(1) latest vehicle state)
+  # Exposes port 6379.
+  # -------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    command: ["redis-server"]
+    ports:
+      - "6379:6379"
+    networks:
+      - data-mesh
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+
+# ---------------------------------------------------------------------------
+# Custom bridge network so services reach each other via Docker DNS
+# (e.g., ping redpanda / clickhouse / redis from any container).
+# ---------------------------------------------------------------------------
+networks:
+  data-mesh:
+    driver: bridge
+
+# ---------------------------------------------------------------------------
+# Named volumes to persist data across container restarts.
+# ---------------------------------------------------------------------------
+volumes:
+  redpanda_data:
+  clickhouse_data:
+  redis_data:
