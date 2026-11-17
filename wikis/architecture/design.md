@@ -1,0 +1,108 @@
+# 🏗️ System Architecture
+
+This document outlines the architectural decisions, data flow, and component design for the Real-Time Geospatial Fleet Analytics Engine. 
+
+The system is designed to handle high-throughput streaming data, process it with sub-second latency, and route bad records gracefully while serving both real-time operational state and historical analytical aggregates.
+
+---
+
+## 🌊 Data Flow Diagram
+
+```mermaid
+flowchart TD
+    %% Define Styles
+    classDef generator fill:#f9f2f4,stroke:#d04464,stroke-width:2px;
+    classDef broker fill:#e6f3ff,stroke:#3388ff,stroke-width:2px;
+    classDef processor fill:#fff2e6,stroke:#ff9933,stroke-width:2px;
+    classDef storage fill:#e6ffe6,stroke:#33cc33,stroke-width:2px;
+    classDef api fill:#f9e6ff,stroke:#cc33ff,stroke-width:2px;
+    classDef ui fill:#ffffe6,stroke:#cccc00,stroke-width:2px;
+
+    %% Components
+    subgraph Data Generation
+        Gen[Python Telemetry Generator<br/>Async Producers]:::generator
+    end
+
+    subgraph Message Bus
+        RP[(Redpanda / Kafka)]:::broker
+        DLQ[(DLQ Topic<br/>telemetry_dlq)]:::broker
+    end
+
+    subgraph Stream Processing Layer
+        SP[Flink / Python Processor<br/>- Schema Validation<br/>- Tumbling Windows<br/>- H3 Geohashing]:::processor
+    end
+
+    subgraph Storage Layer
+        Redis[(Redis<br/>Hot State: O_1_ Lookup)]:::storage
+        CH[(ClickHouse<br/>Cold State: OLAP Aggregates)]:::storage
+    end
+
+    subgraph Serving Layer
+        API_SSE[FastAPI: SSE Stream]:::api
+        API_REST[FastAPI: REST Aggregates]:::api
+    end
+
+    subgraph Presentation Layer
+        UI[Next.js + Deck.gl Dashboard]:::ui
+    end
+
+    %% Data Flow
+    Gen -- "Raw JSON<br/>(telemetry_raw)" --> RP
+    RP -- "Consume Stream" --> SP
+    
+    SP -- "Schema Violation / Bad JSON" --> DLQ
+    SP -- "Latest Vehicle State<br/>(vehicle_id)" --> Redis
+    SP -- "Windowed Aggregates<br/>(10s intervals)" --> CH
+    
+    Redis -- "Pub/Sub or Polling" --> API_SSE
+    CH -- "SQL Queries" --> API_REST
+    
+    API_SSE -- "Live Coordinates<br/>(NDJSON)" --> UI
+    API_REST -- "Zone Heatmaps<br/>(JSON)" --> UI
+```
+
+---
+
+## 🧩 Component Breakdown
+
+### 1. Ingestion: Synthetic Telemetry Generator
+* **Role:** Simulates $N$ vehicles driving through geographic bounding boxes.
+* **Chaos Engineering:** Intentionally drops timestamps, malforms JSON, or corrupts schema types for 2-5% of events to test pipeline resilience.
+* **Protocol:** Produces messages to Redpanda via the Kafka wire protocol.
+
+### 2. Message Broker: Redpanda
+* **Role:** High-throughput, distributed log for decoupling ingestion from processing.
+* **Why Redpanda?** It is API-compatible with Apache Kafka but written in C++, avoiding the JVM memory overhead. This makes it significantly lighter for local Docker-based development and CI/CD pipelines while maintaining production-grade performance.
+* **Topics:** `telemetry_raw`, `telemetry_dlq`.
+
+### 3. Stream Processing Layer
+* **Role:** The core transformation engine. Validates incoming records against expected schemas.
+* **Operations:**
+  * **Validation:** Routes records failing schema checks strictly to the DLQ.
+  * **Geospatial Indexing:** Converts `(lat, lon)` floats into H3 hexagon string IDs (resolution 9) for efficient spatial grouping.
+  * **Windowing:** Calculates rolling averages (e.g., speed, battery drop rate) using a 10-second tumbling window.
+
+### 4. Storage Architecture (CQRS Pattern)
+We use a polyglot persistence strategy to handle the differing read patterns of the UI:
+* **Redis (Hot State):** Stores the absolute latest position and speed of every vehicle. The API requires $O(1)$ lookups to stream current locations. Storing this in an analytical database would result in expensive, unnecessary row updates.
+* **ClickHouse (Cold/Analytical State):** An open-source columnar OLAP database. Used to store the windowed aggregates and historical paths. Designed for massive read performance on queries like: *"What was the P95 speed in hexagon X over the last 15 minutes?"*
+
+### 5. Serving Layer: FastAPI
+* **SSE (Server-Sent Events):** A unidirectional websocket alternative perfectly suited for streaming live telemetry to the browser without polling overhead.
+* **REST Endpoints:** Standard JSON endpoints for querying historical analytics and the DLQ error rate.
+
+### 6. Presentation: Next.js + Deck.gl
+* **Deck.gl:** A WebGL-powered framework developed by Uber. It can render hundreds of thousands of moving markers (`IconLayer`) and geospatial polygons (`H3HexagonLayer`) at 60 FPS, far outperforming standard DOM-based mapping libraries (like Leaflet) for streaming use cases.
+
+---
+
+## ⚖️ Design Decisions & Trade-offs
+
+1. **Why not just query ClickHouse directly for live map updates?**
+   While ClickHouse is incredibly fast, it is optimized for append-only analytical queries. Frequently updating individual rows (e.g., vehicle locations updating every second) causes heavy background merges (Mutation overhead). Using Redis for mutable state isolates this load.
+
+2. **Why H3 over raw Geofencing?**
+   Calculating spatial joins (e.g., "Is coordinate X inside polygon Y?") mathematically on the fly is computationally expensive. Uber's H3 grid system converts coordinates into a deterministic string index. This turns expensive geospatial queries into simple, extremely fast string aggregations (`GROUP BY h3_index`).
+
+3. **Dead Letter Queue (DLQ) Strategy**
+   In streaming environments, a bad payload can cause infinite retry loops, crashing consumers and stalling partitions (poison pill). By catching serialization/schema exceptions and routing the raw bytes to a DLQ, the pipeline continues processing valid data while preserving the corrupted data for engineering review.
