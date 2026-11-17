@@ -1,0 +1,5 @@
+# ---------------------------------------------------------------------------
+# api / requirements.txt
+# Python dependencies for the FastAPI backend.
+# Add packages here as the API service is implemented (Phase 1+).
+# ---------------------------------------------------------------------------

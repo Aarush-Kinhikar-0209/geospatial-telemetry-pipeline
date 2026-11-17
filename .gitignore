@@ -1,0 +1,75 @@
+# ---------------------------------------------------------------------------
+# Phase 0: Project Setup & Skeleton - Global .gitignore
+# Prevents committing virtual environments, cache files, and credentials.
+# ---------------------------------------------------------------------------
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+var/
+sdist/
+wheelhouse/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache
+.ipynb_checkpoints/
+
+# --- Virtual environments ---
+.venv/
+venv/
+ENV/
+env/
+.venv*/
+
+# --- Local test data ---
+data/
+
+# --- Environment / credentials (never commit secrets) ---
+.env
+.env.local
+.env.*.local
+.env.production
+*.pem
+*.key
+secrets.json
+
+# --- IDE / Editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.tmp
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Node.js / Frontend ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.next/
+out/
+*.tsbuildinfo
+
+# --- Misc ---
+*.log
+.pypirc

@@ -1,0 +1,5 @@
+# ---------------------------------------------------------------------------
+# generator / requirements.txt
+# Python dependencies for the synthetic fleet telemetry data producer.
+# Add packages here as the generator service is implemented (Phase 1+).
+# ---------------------------------------------------------------------------
