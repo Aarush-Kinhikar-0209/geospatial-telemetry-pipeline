@@ -23,8 +23,6 @@ services:
       - 1G
       - --reserve-memory
       - "0M"
-      - --node-address
-      - 0.0.0.0
       - --kafka-addr
       - 0.0.0.0:9092
       - --advertise-kafka-addr
@@ -54,6 +52,8 @@ services:
       - "9000:9000"
     networks:
       - data-mesh
+    environment:
+      - CLICKHOUSE_ALLOW_EMPTY_PASSWORD=1
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./infrastructure/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
