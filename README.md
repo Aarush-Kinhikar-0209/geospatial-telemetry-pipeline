@@ -22,17 +22,18 @@ This project simulates a live fleet of delivery vehicles, processes their teleme
 
 ```mermaid
 graph TD
-    A[Python Telemetry Generator<br/><i>(Simulates 200+ Vehicles + Chaos)</i>] -->|Raw JSON| B(Redpanda / Kafka)
-    B -->|Subscribe| C[Stream Processor<br/><i>(Windowing, H3 Geohashing)</i>]
+    A["Telemetry Generator<br/>(Simulates 200+ Vehicles)"] -->|JSON via sockets| B["Kafka / Redpanda Broker"]
     
-    C -->|Malformed Payloads| D[(DLQ Topic)]
-    C -->|Latest State| E[(Redis)]
-    C -->|Aggregates & History| F[(ClickHouse)]
+    B --> C["Stream Processor<br/>(Flink / PySpark)"]
     
-    E -->|Server-Sent Events| G[FastAPI Backend]
-    F -->|REST OLAP Queries| G
+    C -->|Malformed Pings| D["Dead Letter Queue (DLQ)"]
+    C -->|Aggregates & Geohashes| E["ClickHouse<br/>(OLAP Storage)"]
+    C -->|Latest Coordinates| F["Redis<br/>(In-Memory Cache)"]
     
-    G -->|Real-Time Feed| H[Next.js + Deck.gl UI]
+    E --> G["FastAPI Backend"]
+    F --> G
+    
+    G -->|Server-Sent Events| H["Next.js + Deck.gl UI"]
 ```
 
 ## 📂 Repository Structure
