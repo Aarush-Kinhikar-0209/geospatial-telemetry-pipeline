@@ -25,12 +25,13 @@ CREATE TABLE IF NOT EXISTS telemetry_events (
 ) ENGINE = MergeTree()
 ORDER BY (vehicle_id, timestamp);
 
--- Tumbling-window speed averages per H3 cell (AggregatingMergeTree).
+-- Tumbling-window speed averages per vehicle (MergeTree).
 -- Populated by the stream processor; queried by the API for OLAP dashboards.
 CREATE TABLE IF NOT EXISTS speed_rollups (
-    h3_index     String,
-    window_start DateTime,
-    avg_speed    AggregateFunction(avg, Float64),
-    cnt          AggregateFunction(count, )
-) ENGINE = AggregatingMergeTree()
-ORDER BY (h3_index, window_start);
+    vehicle_id     String,
+    window_start   DateTime,
+    avg_speed_kmh  Float64,
+    cnt            UInt32,
+    h3_index       String
+) ENGINE = MergeTree()
+ORDER BY (vehicle_id, window_start);

@@ -108,7 +108,7 @@ class StreamProcessor:
             INPUT_TOPIC,
             bootstrap_servers=BOOTSTRAP_SERVERS,
             group_id=CONSUMER_GROUP,
-            enable_auto_commit=False,  # manual checkpointing for exactly-once
+            enable_auto_commit=False,  # manual checkpointing for at-least-once
             auto_offset_reset='earliest',
             value_deserializer=lambda v: v.decode('utf-8'),
         )
