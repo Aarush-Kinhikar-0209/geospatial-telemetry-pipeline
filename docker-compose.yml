@@ -54,15 +54,17 @@ services:
       - data-mesh
     environment:
       - CLICKHOUSE_ALLOW_EMPTY_PASSWORD=1
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=default
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./infrastructure/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8123/ping"]
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8123/ping"]
       interval: 10s
       timeout: 5s
       retries: 15
-      start_period: 10s
+      start_period: 30s
 
   # -------------------------------------------------------------------------
   # State Store: Redis (O(1) latest vehicle state)
@@ -95,11 +97,11 @@ services:
       dockerfile: generator/Dockerfile
     container_name: generator
     environment:
-      - VEHICLE_COUNT=200
+      - VEHICLE_COUNT=1
       - CHAOS_PERCENTAGE=5
       - BOOTSTRAP_SERVERS=redpanda:9092
       - TOPIC=telemetry_raw
-      - MESSAGE_INTERVAL=0.2
+      - MESSAGE_INTERVAL=2.0
     networks:
       - data-mesh
     depends_on:
