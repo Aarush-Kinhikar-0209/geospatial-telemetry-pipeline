@@ -1,5 +1,9 @@
 # ---------------------------------------------------------------------------
 # generator / requirements.txt
 # Python dependencies for the synthetic fleet telemetry data producer.
-# Add packages here as the generator service is implemented (Phase 1+).
 # ---------------------------------------------------------------------------
+
+aiokafka>=0.11.0
+pydantic>=2.5.0
+python-dotenv>=1.0.0
+

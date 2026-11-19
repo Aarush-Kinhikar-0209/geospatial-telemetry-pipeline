@@ -85,6 +85,27 @@ services:
       retries: 15
       start_period: 5s
 
+  # -------------------------------------------------------------------------
+  # Data Generator: Python synthetic telemetry producer
+  # Streams fleet telemetry into the telemetry_raw topic on Redpanda.
+  # -------------------------------------------------------------------------
+  generator:
+    build:
+      context: .
+      dockerfile: generator/Dockerfile
+    container_name: generator
+    environment:
+      - VEHICLE_COUNT=200
+      - CHAOS_PERCENTAGE=5
+      - BOOTSTRAP_SERVERS=redpanda:9092
+      - TOPIC=telemetry_raw
+      - MESSAGE_INTERVAL=0.2
+    networks:
+      - data-mesh
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
 # ---------------------------------------------------------------------------
 # Custom bridge network so services reach each other via Docker DNS
 # (e.g., ping redpanda / clickhouse / redis from any container).
