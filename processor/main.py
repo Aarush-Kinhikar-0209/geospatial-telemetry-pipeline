@@ -16,6 +16,7 @@ Usage:
 """
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -57,6 +58,9 @@ ALLOWED_LATENESS_SECONDS: int = int(os.getenv('ALLOWED_LATENESS_SECONDS', '5'))
 CHECKPOINT_INTERVAL: float = float(os.getenv('CHECKPOINT_INTERVAL', '10'))
 MAX_BUFFERED_EVENTS: int = int(os.getenv('MAX_BUFFERED_EVENTS', '50000'))
 STATE_TTL_SECONDS: int = int(os.getenv('STATE_TTL_SECONDS', '60'))
+UPDATES_CHANNEL: str = os.getenv('UPDATES_CHANNEL', 'vehicles:updates')
+METRICS_KEY_PREFIX: str = os.getenv('METRICS_KEY_PREFIX', 'metrics:pipeline:')
+METRICS_TTL_SECONDS: int = int(os.getenv('METRICS_TTL_SECONDS', '300'))
 H3_RESOLUTION: int = int(os.getenv('H3_RESOLUTION', '9'))
 METRICS_INTERVAL: float = float(os.getenv('METRICS_INTERVAL', '10'))
 STARTUP_RETRIES: int = int(os.getenv('STARTUP_RETRIES', '15'))
@@ -215,6 +219,20 @@ def iso_z(ts: datetime) -> str:
     return ts.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
+def vehicle_state(event: EnrichedEvent, processed_at: str) -> dict:
+    """Latest-state record, stored in Redis and published to SSE subscribers."""
+    return {
+        'vehicle_id': event.payload.vehicle_id,
+        'lat': event.payload.lat,
+        'lon': event.payload.lon,
+        'speed_kmh': event.payload.speed_kmh,
+        'battery_pct': event.payload.battery_pct,
+        'h3_index': event.h3_index,
+        'timestamp': iso_z(event.payload.timestamp),
+        'processed_at': processed_at,
+    }
+
+
 async def with_retries(what: str, attempt):
     """Retry a startup connection so the processor tolerates slow dependencies."""
     for i in range(1, STARTUP_RETRIES + 1):
@@ -322,11 +340,14 @@ class StreamProcessor:
 
     async def process_batch(self, records: dict) -> None:
         valid: list[tuple[EnrichedEvent, int]] = []
+        batch_processed = batch_dlq = 0
         for tp, messages in records.items():
             for message in messages:
                 self.processed += 1
+                batch_processed += 1
                 event, reason = classify(message.value)
                 if event is None:
+                    batch_dlq += 1
                     await self.send_to_dlq(message, reason)
                 else:
                     self.windows.add(event, tp, message.offset)
@@ -346,8 +367,8 @@ class StreamProcessor:
                     valid.append((event, message.timestamp))
                 self.next_offsets[tp] = message.offset + 1
 
-        if valid:
-            await self.write_state(valid)
+        if batch_processed:
+            await self.write_state(valid, batch_processed, batch_dlq)
 
     async def send_to_dlq(self, message, reason: str) -> None:
         self.dlq_count += 1
@@ -363,8 +384,15 @@ class StreamProcessor:
             ],
         )
 
-    async def write_state(self, valid: list[tuple[EnrichedEvent, int]]) -> None:
-        """Write the latest state per vehicle in this batch to Redis (Key: vehicle:{id})."""
+    async def write_state(
+        self, valid: list[tuple[EnrichedEvent, int]], processed: int, dlq: int
+    ) -> None:
+        """
+        One Redis round trip per batch:
+          * latest state per vehicle (Key: vehicle:{id}, with TTL)
+          * per-second processed/DLQ counters (read by the API's DLQ metrics)
+          * a pub/sub message with the changed vehicles (fanned out by the API's SSE)
+        """
         latest: dict[str, EnrichedEvent] = {}
         for event, _ in valid:
             current = latest.get(event.payload.vehicle_id)
@@ -372,22 +400,19 @@ class StreamProcessor:
                 latest[event.payload.vehicle_id] = event
 
         processed_at = iso_z(datetime.now(timezone.utc))
+        states = [vehicle_state(event, processed_at) for event in latest.values()]
+        metrics_key = f'{METRICS_KEY_PREFIX}{int(time.time())}'
+
         async with self.redis.pipeline(transaction=False) as pipe:
-            for vehicle_id, event in latest.items():
-                key = f'vehicle:{vehicle_id}'
-                pipe.hset(
-                    key,
-                    mapping={
-                        'h3_index': event.h3_index,
-                        'speed_kmh': event.payload.speed_kmh,
-                        'battery_pct': event.payload.battery_pct,
-                        'lat': event.payload.lat,
-                        'lon': event.payload.lon,
-                        'timestamp': iso_z(event.payload.timestamp),
-                        'processed_at': processed_at,
-                    },
-                )
+            for state in states:
+                key = f'vehicle:{state["vehicle_id"]}'
+                pipe.hset(key, mapping=state)
                 pipe.expire(key, STATE_TTL_SECONDS)
+            pipe.hincrby(metrics_key, 'processed', processed)
+            pipe.hincrby(metrics_key, 'dlq', dlq)
+            pipe.expire(metrics_key, METRICS_TTL_SECONDS)
+            if states:
+                pipe.publish(UPDATES_CHANNEL, json.dumps(states, separators=(',', ':')))
             await pipe.execute()
 
         # Kafka record timestamp (producer create time) -> Redis write acked.

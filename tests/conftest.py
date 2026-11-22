@@ -27,3 +27,8 @@ def gen() -> ModuleType:
 @pytest.fixture
 def proc() -> ModuleType:
     return load_service('processor')
+
+
+@pytest.fixture
+def api() -> ModuleType:
+    return load_service('api')

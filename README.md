@@ -44,7 +44,7 @@ graph TD
 *   `/processor`: Stream processing application handling geohashing, windowing, and DLQ routing.
 *   `/api`: FastAPI application serving SSE streams and aggregate REST endpoints.
 *   `/ui`: Next.js frontend with Deck.gl for 60FPS map rendering.
-*   `/tests`: Unit tests for the generator and processor (`pytest`).
+*   `/tests`: Unit and API contract tests for the generator, processor and API (`pytest`).
 *   `/docs`: Project documentation.
 *   `/wikis`: Architecture notes and phase-by-phase acceptance criteria.
 

@@ -13,6 +13,7 @@ Settings live in `.env` (copy from `.env.example`). Compose substitutes them int
 | `MESSAGE_INTERVAL` | `0.2` | `2.0` | Seconds between messages per vehicle (200 x 0.2s ~= 1000 msg/s) |
 | `CHAOS_PERCENTAGE` | `5` | `5` | Exact share of malformed payloads, for DLQ testing |
 | `PROCESSOR_LOG_LEVEL` | `INFO` | `DEBUG` | `DEBUG` logs every DLQ record with its reason |
+| `CORS_ORIGINS` | `http://localhost:3000,http://localhost:5173` | | Comma-separated browser origins allowed by the API |
 
 Processor settings fixed in `docker-compose.yml`: `WINDOW_SECONDS=10` (tumbling window), `ALLOWED_LATENESS_SECONDS=5`, `CHECKPOINT_INTERVAL=10` (ClickHouse flush + offset commit), `STATE_TTL_SECONDS=60` (Redis key expiry).
 
@@ -29,7 +30,7 @@ cp .env.example .env    # set CLICKHOUSE_PASSWORD
 docker compose up -d --build
 ```
 
-This starts 5 services: Redpanda, ClickHouse, Redis, Generator, and Processor.
+This starts 6 services: Redpanda, ClickHouse, Redis, Generator, Processor, and the API.
 
 ### 2. Verify All Services Are Healthy
 
@@ -37,7 +38,7 @@ This starts 5 services: Redpanda, ClickHouse, Redis, Generator, and Processor.
 docker compose ps
 ```
 
-Redpanda, ClickHouse and Redis must show `(healthy)`; generator and processor show `Up`.
+Redpanda, ClickHouse, Redis and the API must show `(healthy)`; generator and processor show `Up`.
 
 Kafka is reachable from containers at `redpanda:29092` and from the host at `localhost:9092`.
 
@@ -112,6 +113,41 @@ docker exec redpanda rpk group describe stream-processor
 
 While running, committed lag stays around 15 seconds of data (window + lateness). The processor never commits past a record whose window is not yet in ClickHouse. After a clean `docker compose stop processor`, lag is 0.
 
+### 7. Serving API
+
+Swagger UI: http://localhost:8000/docs
+
+```bash
+# Health of both stores and the live feed (503 + "degraded" if a store is down)
+curl -s http://localhost:8000/api/v1/health
+
+# Snapshot of every live vehicle (from Redis)
+curl -s http://localhost:8000/api/v1/vehicles | head -c 300
+
+# Live stream: a `snapshot` event, then batched `update` events (~50 ms coalescing)
+curl -N http://localhost:8000/api/v1/stream/vehicles
+curl -N "http://localhost:8000/api/v1/stream/vehicles?format=ndjson"
+
+# Top 5 busiest H3 cells over 15 minutes; query_ms is the ClickHouse time (target < 50 ms)
+curl -s "http://localhost:8000/api/v1/analytics/zones?minutes=15&limit=5"
+
+# DLQ rate over the last 10 s plus a 60 s per-second series
+curl -s "http://localhost:8000/api/v1/metrics/dlq?window=10&history=60"
+```
+
+With the default 5% chaos, `dlq_ratio` sits near `0.05`.
+
+**SSE load test** (reports push latency = API delivery time minus processor write time):
+
+```bash
+python api/loadtest_sse.py --clients 50 --seconds 20 --procs 4
+python api/loadtest_sse.py --clients 100 --seconds 20 --procs 8
+```
+
+Reference run (WSL2, 10 cores): 50 clients p95 = 88 ms; 100 clients all connected, p95 = 130 ms (the load generator itself becomes the bottleneck when it runs on the same machine).
+
+**Database drop:** `docker compose stop clickhouse` makes `/analytics/zones` return `503` with `{"detail": ..., "dependency": "clickhouse"}`; `docker compose stop redis` does the same for the Redis-backed routes. Open SSE streams stay connected through a Redis outage and resume when it returns. Start the service again and the endpoints recover without restarting the API.
+
 ---
 
 ## 🧪 Unit Tests
@@ -140,6 +176,7 @@ geospatial-telemetry-pipeline/
 ├── requirements-dev.txt
 ├── generator/          # Synthetic data producer
 ├── processor/          # Stream processor (DLQ, H3, windowing) + demo_local.py
+├── api/                # FastAPI serving layer + loadtest_sse.py
 ├── infrastructure/
 │   └── docker-entrypoint-initdb.d/init-clickhouse.sql
 ├── tests/              # pytest suites

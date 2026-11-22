@@ -150,6 +150,41 @@ services:
       clickhouse:
         condition: service_healthy
 
+  # -------------------------------------------------------------------------
+  # Serving API: FastAPI (SSE live feed, zone analytics, DLQ metrics)
+  # Swagger UI at http://localhost:8000/docs
+  # -------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?Set CLICKHOUSE_PASSWORD in .env (see .env.example)}
+      - CLICKHOUSE_DB=fleet_analytics
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+    networks:
+      - data-mesh
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    depends_on:
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+
 # ---------------------------------------------------------------------------
 # Custom bridge network so services reach each other via Docker DNS
 # (e.g., ping redpanda / clickhouse / redis from any container).
