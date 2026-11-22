@@ -20,7 +20,7 @@ import signal
 import sys
 from datetime import datetime, timezone
 
-from pydantic import BaseModel
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 try:  # python-dotenv is optional; env vars can be set directly in the shell
     from dotenv import load_dotenv
@@ -37,6 +37,7 @@ CHAOS_PERCENTAGE: float = float(os.getenv('CHAOS_PERCENTAGE', '5.0'))
 BOOTSTRAP_SERVERS: str = os.getenv('BOOTSTRAP_SERVERS', 'localhost:9092')
 TOPIC: str = os.getenv('TOPIC', 'telemetry_raw')
 MESSAGE_INTERVAL: float = float(os.getenv('MESSAGE_INTERVAL', '0.2'))
+METRICS_INTERVAL: float = 10.0
 
 # Bounding box around Mumbai (matches the example payload in the wiki).
 LAT_MIN: float = 18.80
@@ -55,14 +56,53 @@ logger = logging.getLogger('generator')
 # Payload schema
 # ---------------------------------------------------------------------------
 class TelemetryPayload(BaseModel):
-    """Clean telemetry payload conforming to the pipeline schema."""
+    """
+    Clean telemetry payload conforming to the pipeline schema.
 
-    vehicle_id: str
-    timestamp: str
-    lat: float
-    lon: float
-    speed_kmh: float
-    battery_pct: int
+    Kept in sync with processor/main.py, which enforces the same contract.
+    """
+
+    model_config = ConfigDict(strict=True)
+
+    vehicle_id: str = Field(min_length=1)
+    timestamp: AwareDatetime
+    lat: float = Field(ge=-90, le=90, allow_inf_nan=False)
+    lon: float = Field(ge=-180, le=180, allow_inf_nan=False)
+    speed_kmh: float = Field(ge=0, le=300, allow_inf_nan=False)
+    battery_pct: int = Field(ge=0, le=100)
+
+
+def validate_config() -> None:
+    """Fail fast on nonsensical settings."""
+    if VEHICLE_COUNT < 1:
+        raise ValueError(f'VEHICLE_COUNT must be >= 1, got {VEHICLE_COUNT}')
+    if MESSAGE_INTERVAL <= 0:
+        raise ValueError(f'MESSAGE_INTERVAL must be > 0, got {MESSAGE_INTERVAL}')
+    if not 0 <= CHAOS_PERCENTAGE <= 100:
+        raise ValueError(f'CHAOS_PERCENTAGE must be within 0-100, got {CHAOS_PERCENTAGE}')
+    if not 2 <= CHAOS_PERCENTAGE <= 5:
+        logger.warning(
+            'CHAOS_PERCENTAGE=%.1f is outside the 2-5%% range the pipeline is specified for',
+            CHAOS_PERCENTAGE,
+        )
+
+
+def chaos_block() -> list[bool]:
+    """
+    A shuffled block of messages in which exactly CHAOS_PERCENTAGE are chaos.
+
+    Exact per-block counts keep the observed rate verifiable over any window.
+    Shuffling matters: vehicles are scheduled round-robin, so a fixed "every
+    Nth message" pattern would keep corrupting the same vehicles.
+    """
+    for size in (100, 1_000, 10_000):
+        chaos = CHAOS_PERCENTAGE * size / 100
+        if chaos == int(chaos):
+            break
+    chaos = round(chaos)
+    block = [True] * chaos + [False] * (size - chaos)
+    random.shuffle(block)
+    return block
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +117,7 @@ class TelemetryGenerator:
         self.messages_sent: int = 0
         self.chaos_sent: int = 0
         self.total_messages: int = 0
-        self.last_metrics_time: float | None = None
+        self.chaos_schedule: list[bool] = []
         self.vehicles: dict[str, dict] = {}
         self.producer = None
 
@@ -117,11 +157,13 @@ class TelemetryGenerator:
 
     def inject_chaos(self, payload: dict) -> tuple:
         """
-        Corrupt roughly CHAOS_PERCENTAGE of payloads.
+        Corrupt exactly CHAOS_PERCENTAGE of payloads.
 
         Returns (possibly-corrupted payload, is_chaos).
         """
-        if random.random() * 100 >= CHAOS_PERCENTAGE:
+        if not self.chaos_schedule:
+            self.chaos_schedule = chaos_block()
+        if not self.chaos_schedule.pop():
             return payload, False
 
         corrupted = dict(payload)
@@ -143,7 +185,8 @@ class TelemetryGenerator:
             del corrupted['lat']
             del corrupted['lon']
         elif chaos_type == 'negative_speed':
-            corrupted['speed_kmh'] = -abs(corrupted['speed_kmh'])  # type: ignore[assignment]
+            # Strictly negative: a stationary vehicle would otherwise yield -0.0.
+            corrupted['speed_kmh'] = -round(random.uniform(1, 120), 2)
         elif chaos_type == 'missing_battery':
             del corrupted['battery_pct']
 
@@ -175,19 +218,21 @@ class TelemetryGenerator:
         while self.running:
             payload = self.generate_payload(vehicle_id, state)
             corrupted, is_chaos = self.inject_chaos(payload)
-            await self.produce(corrupted, is_chaos)
+            try:
+                await self.produce(corrupted, is_chaos)
+            except Exception as exc:  # keep the vehicle alive across broker hiccups
+                logger.warning('Failed to publish for %s: %s', vehicle_id, exc)
             await asyncio.sleep(MESSAGE_INTERVAL)
 
     async def metrics_loop(self) -> None:
+        loop = asyncio.get_running_loop()
+        last_metrics_time = loop.time()
         while self.running:
-            await asyncio.sleep(10)
+            await asyncio.sleep(METRICS_INTERVAL)
             if not self.running:
                 break
-            now = asyncio.get_event_loop().time()
-            if self.last_metrics_time is None:
-                self.last_metrics_time = now
-                continue
-            elapsed = now - self.last_metrics_time
+            now = loop.time()
+            elapsed = now - last_metrics_time
             rate = self.messages_sent / elapsed if elapsed > 0 else 0
             chaos_rate = (
                 (self.chaos_sent / self.messages_sent * 100) if self.messages_sent > 0 else 0
@@ -202,11 +247,12 @@ class TelemetryGenerator:
             )
             self.messages_sent = 0
             self.chaos_sent = 0
-            self.last_metrics_time = now
+            last_metrics_time = now
 
     # -- entry point --------------------------------------------------------
 
     async def run(self) -> None:
+        validate_config()
         self.initialize_vehicles()
 
         if not self.stdout:
@@ -217,7 +263,7 @@ class TelemetryGenerator:
             await self.producer.start()
             logger.info('Connected to Redpanda at %s', BOOTSTRAP_SERVERS)
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         stop_event = asyncio.Event()
 
         def signal_handler() -> None:

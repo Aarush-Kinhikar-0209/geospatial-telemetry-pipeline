@@ -100,12 +100,13 @@ services:
       context: .
       dockerfile: generator/Dockerfile
     container_name: generator
+    restart: unless-stopped
     environment:
-      - VEHICLE_COUNT=1
-      - CHAOS_PERCENTAGE=5
+      - VEHICLE_COUNT=${VEHICLE_COUNT:-200}
+      - CHAOS_PERCENTAGE=${CHAOS_PERCENTAGE:-5}
       - BOOTSTRAP_SERVERS=redpanda:29092
       - TOPIC=telemetry_raw
-      - MESSAGE_INTERVAL=2.0
+      - MESSAGE_INTERVAL=${MESSAGE_INTERVAL:-0.2}
     networks:
       - data-mesh
     depends_on:

@@ -7,6 +7,9 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# Flush --stdout output and logs immediately (no block buffering in containers).
+ENV PYTHONUNBUFFERED=1
+
 # Install Python dependencies.
 COPY generator/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
