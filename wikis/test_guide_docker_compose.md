@@ -4,13 +4,19 @@ This guide documents how to run the Real-Time Geospatial Fleet Analytics Engine 
 
 ## 📋 Test Configuration
 
-| Parameter | Value | Purpose |
-|-----------|-------|---------|
-| `VEHICLE_COUNT` | `1` | Simulate a single delivery vehicle |
-| `CHAOS_PERCENTAGE` | `5.0` | Inject 5% malformed payloads for DLQ testing |
-| `MESSAGE_INTERVAL` | `2.0` | Produce 1 telemetry message per vehicle every 2 seconds |
-| `WINDOW_SECONDS` | `10` | Tumbling window size (ClickHouse aggregates) |
-| `CHECKPOINT_INTERVAL` | `30` | Processor checkpoint flush interval |
+Settings live in `.env` (copy from `.env.example`). Compose substitutes them into `docker-compose.yml`.
+
+| Parameter | Default | Slow demo | Purpose |
+|-----------|---------|-----------|---------|
+| `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` | `default` / *(required)* | | ClickHouse credentials shared by ClickHouse and the processor |
+| `VEHICLE_COUNT` | `200` | `1` | Number of simulated vehicles |
+| `MESSAGE_INTERVAL` | `0.2` | `2.0` | Seconds between messages per vehicle (200 x 0.2s ~= 1000 msg/s) |
+| `CHAOS_PERCENTAGE` | `5` | `5` | Exact share of malformed payloads, for DLQ testing |
+| `PROCESSOR_LOG_LEVEL` | `INFO` | `DEBUG` | `DEBUG` logs every DLQ record with its reason |
+
+Processor settings fixed in `docker-compose.yml`: `WINDOW_SECONDS=10` (tumbling window), `ALLOWED_LATENESS_SECONDS=5`, `CHECKPOINT_INTERVAL=10` (ClickHouse flush + offset commit), `STATE_TTL_SECONDS=60` (Redis key expiry).
+
+> **Windows:** keep `.env` with LF line endings. Compose does not strip `\r`, so a CRLF file turns the password into `secret\r`.
 
 ---
 
@@ -18,120 +24,125 @@ This guide documents how to run the Real-Time Geospatial Fleet Analytics Engine 
 
 ### 1. Start the Data Platform
 
-```powershell
-cd d:\geospatial-telemetry-pipeline
-docker compose up -d
+```bash
+cp .env.example .env    # set CLICKHOUSE_PASSWORD
+docker compose up -d --build
 ```
 
 This starts 5 services: Redpanda, ClickHouse, Redis, Generator, and Processor.
 
 ### 2. Verify All Services Are Healthy
 
-```powershell
+```bash
 docker compose ps
 ```
 
-Expected output:
-```txt
-NAME         STATUS                    PORTS
-clickhouse   Up X min (health: healthy) 0.0.0.0:8123->8123/tcp, 0.0.0.0:9000->9000/tcp
-generator    Up X min                                    (generator/main.py)
-processor    Up X min                                    (python main.py)
-redis        Up X min (healthy)  0.0.0.0:6379->6379/tcp
-redpanda     Up X min (healthy)  0.0.0.0:9092->9092/tcp
-```
+Redpanda, ClickHouse and Redis must show `(healthy)`; generator and processor show `Up`.
 
-All three data services (ClickHouse, Redis, Redpanda) must show `(health: healthy)` or `Up`.
+Kafka is reachable from containers at `redpanda:29092` and from the host at `localhost:9092`.
 
 ---
 
 ## 🔬 Running the Test
 
-### 1. Watch Generator Output (Terminal View)
+### 1. Watch Generator Output
 
-In a separate terminal, stream the generator logs:
-
-```powershell
+```bash
 docker compose logs -f generator
 ```
 
-You should see 1 message every 2 seconds:
+A metrics line every 10 seconds:
 ```text
-2026-11-19 18:01:30,802 [INFO] generator: window=10s rate=0.5 msg/sec total=10 chaos=1 (10.0%)
-2026-11-19 18:01:40,807 [INFO] generator: window=10s rate=0.5 msg/sec total=15 chaos=0 (0.0%)
-2026-11-19 18:01:50,807 [INFO] generator: window=10s rate=0.5 msg/sec total=20 chaos=0 (0.0%)
-2026-11-19 18:02:00,809 [INFO] generator: window=10s rate=0.5 msg/sec total=30 chaos=0 (0.0%)
+generator: window=10s rate=1000.0 msg/sec total=10000 chaos=500 (5.0%)
 ```
 
-**Note:** `chaos=1` means 1 out of 10 messages in that 10-second window was intentionally malformed. This varies per window due to the random 5% chaos injection.
+### 2. Watch Processor Output
 
-### 2. Watch Processor Output (Terminal View)
-
-In another terminal, stream the processor logs:
-
-```powershell
+```bash
 docker compose logs -f processor
 ```
 
-Expected behavior:
-- **Connected to Kafka, Redis, ClickHouse** — all three connections successful
-- **Schema violations routed to DLQ** — messages with missing fields or malformed JSON are caught and sent to `telemetry_dlq`
-- **No crash** — the processor keeps running through malformed data
-
-Example output:
+Expected:
 ```text
-2026-11-19 18:02:45,764 [INFO] processor: Connected to ClickHouse at clickhouse:9000
-2026-11-19 18:02:46,071 [WARNING] processor: Schema violation, routing to DLQ: ...
-2026-11-19 18:04:08,075 [WARNING] processor: Schema violation, routing to DLQ: ...
-2026-11-19 18:04:34,110 [WARNING] processor: Schema violation, routing to DLQ: ...
-2026-11-19 18:04:44,120 [WARNING] processor: Schema violation, routing to DLQ: ...
+processor: Connected to Kafka at redpanda:29092 (DLQ topic telemetry_dlq)
+processor: Connected to Redis at redis:6379
+processor: Connected to ClickHouse at clickhouse:9000
+processor: Checkpoint: 9500 event(s), 193 window(s) -> ClickHouse; open windows=190
+processor: rate=994.7 msg/sec processed=10008 dlq=500 redis_latency_p95=18.6ms
 ```
+
+`redis_latency_p95` is the time from the Kafka record timestamp to the Redis write (target < 200 ms).
 
 ### 3. Verify Data in ClickHouse
 
-```powershell
-docker exec clickhouse clickhouse-client --query "SELECT * FROM fleet_analytics.speed_rollups FORMAT Vertical"
+`clickhouse-client` inside the container picks up the credentials from its environment.
+
+```bash
+# Tumbling-window averages (the view finalizes the AggregatingMergeTree partials)
+docker exec clickhouse clickhouse-client -q "SELECT * FROM fleet_analytics.speed_rollups_avg ORDER BY window_start DESC LIMIT 5 FORMAT PrettyCompact"
+
+# Raw validated events (FINAL collapses rows replayed after a crash)
+docker exec clickhouse clickhouse-client -q "SELECT count() FROM fleet_analytics.telemetry_events FINAL"
+
+# From the host over HTTP
+curl -u "default:$CLICKHOUSE_PASSWORD" "http://localhost:8123/?query=SELECT%201"
 ```
 
 ### 4. Verify Data in Redis
 
-```powershell
+```bash
 docker exec redis redis-cli HGETALL vehicle:v-001
 ```
 
+Every vehicle's `timestamp` should be under 15 seconds old. Keys expire after 60 seconds without updates.
+
 ### 5. Verify Data in Dead Letter Queue
 
-```powershell
-docker exec redpanda rpk topic consume telemetry_dlq -n 10
+```bash
+docker exec redpanda rpk topic consume telemetry_dlq -n 10 -f '%v  <- %h\n'
+```
+
+Each record is the exact raw payload, with an `error` header giving the reason.
+
+### 6. Consumer Lag
+
+```bash
+docker exec redpanda rpk group describe stream-processor
+```
+
+While running, committed lag stays around 15 seconds of data (window + lateness). The processor never commits past a record whose window is not yet in ClickHouse. After a clean `docker compose stop processor`, lag is 0.
+
+---
+
+## 🧪 Unit Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
 ```
 
 ---
 
 ## 🧹 Cleanup
 
-```powershell
+```bash
 docker compose down -v --remove-orphans
 ```
 
 ---
 
-## 📁 Repository Structure After Test
+## 📁 Repository Structure
 
 ```
-d:\geospatial-telemetry-pipeline\
-├── generator\          # Synthetic data producer
-│   ├── main.py
-│   ├── .venv\
-│   └── requirements.txt
-├── processor\          # Stream processor (DLQ, H3, windowing)
-│   ├── main.py
-│   ├── .venv\
-│   ├── requirements.txt
-│   ├── demo_local.py
-│   └── Dockerfile
-├── infrastructure\
-│   └── docker-entrypoint-initdb.d\init-clickhouse.sql
-├── wikis\
-│   └── test_guide_docker_compose.md
-└── ui\               # (empty - Next.js frontend)
+geospatial-telemetry-pipeline/
+├── docker-compose.yml
+├── .env.example
+├── requirements-dev.txt
+├── generator/          # Synthetic data producer
+├── processor/          # Stream processor (DLQ, H3, windowing) + demo_local.py
+├── infrastructure/
+│   └── docker-entrypoint-initdb.d/init-clickhouse.sql
+├── tests/              # pytest suites
+├── wikis/
+└── ui/
 ```

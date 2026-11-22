@@ -6,7 +6,7 @@
 -- automatically by the clickhouse-server image on first boot (empty volume
 -- only; run `docker compose down -v` to re-apply after editing). It creates
 -- the fleet_analytics database and the tables used by the pipeline:
---   * telemetry_events   - raw validated telemetry (MergeTree)
+--   * telemetry_events   - raw validated telemetry (ReplacingMergeTree)
 --   * speed_rollups      - tumbling-window speed partials (AggregatingMergeTree)
 --   * speed_rollups_avg  - view that finalizes the per-window average
 -- ---------------------------------------------------------------------------
@@ -16,16 +16,21 @@ CREATE DATABASE IF NOT EXISTS fleet_analytics;
 USE fleet_analytics;
 
 -- Raw validated telemetry written by the stream processor (historical paths).
+-- The processor is at-least-once, so a restart can re-insert records; keying
+-- on the source Kafka coordinates lets ReplacingMergeTree drop those replays.
+-- Use FINAL (or GROUP BY the key) when exact counts matter before merges run.
 CREATE TABLE IF NOT EXISTS telemetry_events (
-    vehicle_id   String,
-    timestamp    DateTime64(3, 'UTC'),
-    latitude     Float64,
-    longitude    Float64,
-    speed_kmh    Float64,
-    battery_pct  UInt8,
-    h3_index     String
-) ENGINE = MergeTree()
-ORDER BY (vehicle_id, timestamp);
+    vehicle_id        String,
+    timestamp         DateTime64(3, 'UTC'),
+    latitude          Float64,
+    longitude         Float64,
+    speed_kmh         Float64,
+    battery_pct       UInt8,
+    h3_index          String,
+    source_partition  UInt32,
+    source_offset     UInt64
+) ENGINE = ReplacingMergeTree()
+ORDER BY (vehicle_id, timestamp, source_partition, source_offset);
 
 -- Tumbling-window speed partials per vehicle.
 -- The processor inserts (sum, count) per window; rows for the same window
