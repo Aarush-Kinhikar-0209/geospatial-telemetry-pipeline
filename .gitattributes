@@ -1,0 +1,4 @@
+# docker compose does not strip CR from .env values (a CRLF .env turns
+# "secret" into "secret\r"), and shell scripts run inside Linux containers.
+.env* text eol=lf
+*.sh  text eol=lf

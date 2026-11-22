@@ -9,10 +9,13 @@
 services:
   # -------------------------------------------------------------------------
   # Message Broker: Redpanda (Kafka-compatible, C++, low memory footprint)
-  # Exposes Kafka API on port 9092.
+  # Two Kafka listeners, because a broker must advertise an address its
+  # clients can resolve:
+  #   internal -> redpanda:29092  (containers on data-mesh)
+  #   external -> localhost:9092  (tools/scripts on the host)
   # -------------------------------------------------------------------------
   redpanda:
-    image: docker.redpanda.com/redpandadata/redpanda:latest
+    image: docker.redpanda.com/redpandadata/redpanda:v26.3.1
     container_name: redpanda
     command:
       - redpanda
@@ -24,9 +27,9 @@ services:
       - --reserve-memory
       - "0M"
       - --kafka-addr
-      - 0.0.0.0:9092
+      - internal://0.0.0.0:29092,external://0.0.0.0:9092
       - --advertise-kafka-addr
-      - redpanda:9092
+      - internal://redpanda:29092,external://localhost:9092
     ports:
       - "9092:9092"
     networks:
@@ -43,15 +46,20 @@ services:
   # -------------------------------------------------------------------------
   # OLAP Storage: ClickHouse (fast OLAP queries)
   # HTTP: 8123, Native: 9000.
+  # Credentials come from .env; the image disables network access for a
+  # passwordless default user, so a password is required.
   # -------------------------------------------------------------------------
   clickhouse:
-    image: clickhouse/clickhouse-server:latest
+    image: clickhouse/clickhouse-server:26.10.4.207
     container_name: clickhouse
     ports:
       - "8123:8123"
       - "9000:9000"
     networks:
       - data-mesh
+    environment:
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?Set CLICKHOUSE_PASSWORD in .env (see .env.example)}
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./infrastructure/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
@@ -95,7 +103,7 @@ services:
     environment:
       - VEHICLE_COUNT=1
       - CHAOS_PERCENTAGE=5
-      - BOOTSTRAP_SERVERS=redpanda:9092
+      - BOOTSTRAP_SERVERS=redpanda:29092
       - TOPIC=telemetry_raw
       - MESSAGE_INTERVAL=2.0
     networks:
@@ -113,7 +121,7 @@ services:
       dockerfile: processor/Dockerfile
     container_name: processor
     environment:
-      - BOOTSTRAP_SERVERS=redpanda:9092
+      - BOOTSTRAP_SERVERS=redpanda:29092
       - INPUT_TOPIC=telemetry_raw
       - DLQ_TOPIC=telemetry_dlq
       - CONSUMER_GROUP=stream-processor
