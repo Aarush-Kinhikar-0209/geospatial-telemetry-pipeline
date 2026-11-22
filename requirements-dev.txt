@@ -1,0 +1,13 @@
+# ---------------------------------------------------------------------------
+# requirements-dev.txt
+# Local development / CI dependencies: every service's runtime deps plus the
+# linting and test tooling.
+#
+# Usage: pip install -r requirements-dev.txt
+# ---------------------------------------------------------------------------
+
+-r generator/requirements.txt
+-r processor/requirements.txt
+
+ruff>=0.8.0
+pytest>=8.0.0

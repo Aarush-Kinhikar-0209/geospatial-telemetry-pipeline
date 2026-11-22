@@ -38,12 +38,26 @@ graph TD
 
 ## 📂 Repository Structure
 
-*   `/infrastructure`: `docker-compose.yml` and initialization scripts for Redpanda, Redis, and ClickHouse.
+*   `docker-compose.yml`: Orchestrates every service (lives at the repository root).
+*   `/infrastructure`: Initialization scripts for ClickHouse.
 *   `/generator`: Python script to simulate fleet movement and inject chaotic/malformed data.
 *   `/processor`: Stream processing application handling geohashing, windowing, and DLQ routing.
 *   `/api`: FastAPI application serving SSE streams and aggregate REST endpoints.
 *   `/ui`: Next.js frontend with Deck.gl for 60FPS map rendering.
-*   `/docs`: Detailed sprint planning and phase-by-phase acceptance criteria.
+*   `/tests`: Unit tests for the generator and processor (`pytest`).
+*   `/docs`: Project documentation.
+*   `/wikis`: Architecture notes and phase-by-phase acceptance criteria.
+
+## 🧑‍💻 Local Development
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+
+ruff check . && ruff format --check .
+pytest
+```
 
 ## 🚀 Quick Start
 
@@ -57,6 +71,7 @@ Ensure you have [Docker](https://docs.docker.com/get-docker/) and Docker Compose
 
 2. **Spin up the data platform:**
    ```bash
+   cp .env.example .env   # then edit credentials / tuning knobs
    docker compose up -d
    ```
    *This single command boots the broker, databases, stream processor, data generator, and backend APIs.*
@@ -73,10 +88,9 @@ Ensure you have [Docker](https://docs.docker.com/get-docker/) and Docker Compose
 
 ## 🧪 Chaos Engineering & DLQ
 
-To see the Dead Letter Queue in action, you can adjust the chaos parameters in the `docker-compose.yml` under the `data-generator` service:
-```yaml
-environment:
-  - CHAOS_PERCENTAGE=5  # Forces 5% of records to violate schema
+To see the Dead Letter Queue in action, adjust the chaos parameter in your `.env` (consumed by the `generator` service in `docker-compose.yml`):
+```bash
+CHAOS_PERCENTAGE=5  # Forces 5% of records to violate schema
 ```
 Watch the "DLQ Monitor" on the frontend light up as bad payloads are safely quarantined without crashing the consumer.
 
