@@ -14,6 +14,8 @@ Settings live in `.env` (copy from `.env.example`). Compose substitutes them int
 | `CHAOS_PERCENTAGE` | `5` | `5` | Exact share of malformed payloads, for DLQ testing |
 | `PROCESSOR_LOG_LEVEL` | `INFO` | `DEBUG` | `DEBUG` logs every DLQ record with its reason |
 | `CORS_ORIGINS` | `http://localhost:3000,http://localhost:5173` | | Comma-separated browser origins allowed by the API |
+| `VITE_MAP_STYLE_URL` | *(empty = CARTO Dark Matter)* | | Base map style for the UI image (build time) |
+| `VITE_DLQ_ALERT_RATIO` | `0.1` | | DLQ share over 3 s that turns the UI's DLQ monitor red (build time) |
 
 Processor settings fixed in `docker-compose.yml`: `WINDOW_SECONDS=10` (tumbling window), `ALLOWED_LATENESS_SECONDS=5`, `CHECKPOINT_INTERVAL=10` (ClickHouse flush + offset commit), `STATE_TTL_SECONDS=60` (Redis key expiry).
 
@@ -30,7 +32,7 @@ cp .env.example .env    # set CLICKHOUSE_PASSWORD
 docker compose up -d --build
 ```
 
-This starts 6 services: Redpanda, ClickHouse, Redis, Generator, Processor, and the API.
+This starts 7 services: Redpanda, ClickHouse, Redis, Generator, Processor, the API, and the UI.
 
 ### 2. Verify All Services Are Healthy
 
@@ -38,7 +40,7 @@ This starts 6 services: Redpanda, ClickHouse, Redis, Generator, Processor, and t
 docker compose ps
 ```
 
-Redpanda, ClickHouse, Redis and the API must show `(healthy)`; generator and processor show `Up`.
+Redpanda, ClickHouse, Redis, the API and the UI must show `(healthy)`; generator and processor show `Up`.
 
 Kafka is reachable from containers at `redpanda:29092` and from the host at `localhost:9092`.
 
@@ -148,6 +150,35 @@ Reference run (WSL2, 10 cores): 50 clients p95 = 88 ms; 100 clients all connecte
 
 **Database drop:** `docker compose stop clickhouse` makes `/analytics/zones` return `503` with `{"detail": ..., "dependency": "clickhouse"}`; `docker compose stop redis` does the same for the Redis-backed routes. Open SSE streams stay connected through a Redis outage and resume when it returns. Start the service again and the endpoints recover without restarting the API.
 
+### 8. Live Map UI
+
+Open http://localhost:3000 (nginx serves the bundle and proxies `/api`, including the SSE stream).
+
+| Check | Expected |
+|-------|----------|
+| Render | Dark base map of Mumbai, no "Base map" error banner, no console errors |
+| Data binding | Fleet panel shows `Live` and ~`VEHICLE_COUNT` active vehicles; markers glide between updates |
+| Zones | Purple H3 cells on the map; top 5 listed under "Busiest zones" |
+| Time to live data | Footer "first data in … ms" < 1000 ms |
+| FPS | Fleet panel FPS ~60 (at the display's refresh rate) |
+| DLQ monitor | `Nominal` at ~5%; Redis / ClickHouse / Feed dots green |
+
+**Chaos spike:**
+```bash
+CHAOS_PERCENTAGE=50 docker compose up -d generator
+```
+Within ~2 s of the generator reconnecting, the DLQ monitor turns red, flashes, and shows `DLQ spike`. Restore with `docker compose up -d generator`.
+
+**1,000 markers:** `VEHICLE_COUNT=1000 MESSAGE_INTERVAL=1.0 docker compose up -d generator` (same ~1000 msg/s). Vehicles silent for 30 s are pruned client-side, so switching back to 200 vehicles shrinks the count after half a minute.
+
+**Outages (no page reload needed):**
+- `docker compose stop redis`: the stream stays connected but goes `Stalled` after 5 s; the Redis and Feed dots turn red. `start redis` and markers move again within a few seconds.
+- `docker compose stop api`: the pill shows `Reconnecting…` and the API dot turns red. `start api` and it is `Live` again within ~2 s of the API being up.
+
+Reference run (Edge headless on Intel UHD integrated GPU, 1,000 vehicles): 56 FPS, equal to that browser's empty-page frame rate; JS main thread ~16% busy; first data 290–460 ms on reload; JS heap flat over 30 minutes.
+
+**UI dev server:** `cd ui && npm ci && npm run dev` serves http://localhost:5173 with `/api` proxied to `localhost:8000`.
+
 ---
 
 ## 🧪 Unit Tests
@@ -155,6 +186,8 @@ Reference run (WSL2, 10 cores): 50 clients p95 = 88 ms; 100 clients all connecte
 ```bash
 pip install -r requirements-dev.txt
 pytest
+
+cd ui && npm ci && npm run typecheck && npm test
 ```
 
 ---
@@ -181,5 +214,5 @@ geospatial-telemetry-pipeline/
 │   └── docker-entrypoint-initdb.d/init-clickhouse.sql
 ├── tests/              # pytest suites
 ├── wikis/
-└── ui/
+└── ui/                 # React + Vite + deck.gl dashboard (Dockerfile -> nginx)
 ```

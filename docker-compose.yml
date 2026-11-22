@@ -185,6 +185,27 @@ services:
       clickhouse:
         condition: service_healthy
 
+  ui:
+    build:
+      context: ./ui
+      args:
+        VITE_MAP_STYLE_URL: ${VITE_MAP_STYLE_URL:-}
+        VITE_DLQ_ALERT_RATIO: ${VITE_DLQ_ALERT_RATIO:-0.1}
+    container_name: ui
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    networks:
+      - data-mesh
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      api:
+        condition: service_healthy
+
 # ---------------------------------------------------------------------------
 # Custom bridge network so services reach each other via Docker DNS
 # (e.g., ping redpanda / clickhouse / redis from any container).
