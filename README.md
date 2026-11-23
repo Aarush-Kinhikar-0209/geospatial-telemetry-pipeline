@@ -36,7 +36,7 @@ graph TD
 *   `api/`: FastAPI service with SSE streams, REST endpoints, and simulation control.
 *   `ui/`: React + Vite frontend, with deck.gl layers over a MapLibre base map.
 *   `tests/`: pytest tests for the generator, processor and API. UI unit tests live in `ui/src` (Vitest).
-*   `wikis/`: architecture notes, phase briefs, and the Docker Compose test guide.
+*   `wikis/`: architecture notes (`architecture/design.md`) and the Docker Compose test guide.
 
 ## 🧑‍💻 Local Development
 
