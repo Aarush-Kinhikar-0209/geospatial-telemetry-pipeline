@@ -5,7 +5,6 @@ Phase 4: Fast Serving APIs (FastAPI)
 Bridges the frontend to the data stores without exposing them directly:
   * GET /api/v1/stream/vehicles   live vehicle state (SSE, or NDJSON with ?format=ndjson)
   * GET /api/v1/vehicles          current state snapshot
-  * GET /api/v1/analytics/zones   busiest H3 cells over the last N minutes (ClickHouse)
   * GET /api/v1/metrics/dlq       processed / dead-lettered message rates (Redis)
   * GET /api/v1/health            dependency health
 
@@ -26,7 +25,6 @@ import os
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
 import clickhouse_connect
@@ -87,20 +85,6 @@ class VehicleState(BaseModel):
     h3_index: str
     timestamp: str = Field(description='Event time reported by the vehicle (ISO-8601, UTC)')
     processed_at: str = Field(description='When the stream processor wrote this state')
-
-
-class Zone(BaseModel):
-    h3_index: str = Field(description='H3 cell (resolution 9)')
-    vehicles: int = Field(description='Distinct vehicles seen in the cell')
-    events: int = Field(description='Telemetry events recorded in the cell')
-    avg_speed_kmh: float
-
-
-class ZonesResponse(BaseModel):
-    window_minutes: int
-    generated_at: datetime
-    query_ms: float = Field(description='ClickHouse query time')
-    zones: list[Zone]
 
 
 class DlqPoint(BaseModel):
@@ -308,33 +292,8 @@ async def vehicle_events(
 
 
 # ---------------------------------------------------------------------------
-# ClickHouse
+# ClickHouse (health check; the processor owns the analytical writes)
 # ---------------------------------------------------------------------------
-# Aliases differ from the column names on purpose: ClickHouse resolves a name
-# to its alias first, so `sum(events) AS events` breaks `sum(speed_sum) / sum(events)`.
-# Cells are ranked by event volume (cheap sums) and uniqMerge runs only for the
-# winners; merging every cell's uniq state would blow the 50 ms query budget.
-ZONES_SQL = """
-SELECT
-    h3_index,
-    uniqMerge(vehicles)          AS zone_vehicles,
-    sum(events)                  AS zone_events,
-    sum(speed_sum) / sum(events) AS avg_speed_kmh
-FROM zone_activity
-WHERE minute >= toStartOfMinute(now() - toIntervalMinute({minutes:UInt32}))
-  AND h3_index IN (
-    SELECT h3_index
-    FROM zone_activity
-    WHERE minute >= toStartOfMinute(now() - toIntervalMinute({minutes:UInt32}))
-    GROUP BY h3_index
-    ORDER BY sum(events) DESC, h3_index
-    LIMIT {limit:UInt32}
-  )
-GROUP BY h3_index
-ORDER BY zone_events DESC, h3_index
-"""
-
-
 async def default_clickhouse_factory():
     return await clickhouse_connect.get_async_client(
         host=CLICKHOUSE_HOST,
@@ -391,7 +350,7 @@ def create_app(
     app = FastAPI(
         title='Fleet Analytics API',
         version='1.0.0',
-        description='Live vehicle state, zone analytics and pipeline health for the fleet UI.',
+        description='Live vehicle state and pipeline health for the fleet UI.',
         lifespan=lifespan,
     )
     app.add_middleware(
@@ -430,7 +389,6 @@ def create_app(
         return state.clickhouse
 
     RedisDep = Annotated[Redis, Depends(get_redis)]
-    ClickHouseDep = Annotated[Any, Depends(get_clickhouse)]
 
     @app.get('/api/v1/vehicles', response_model=list[VehicleState], tags=['live'])
     async def vehicles(redis: RedisDep) -> list[VehicleState]:
@@ -479,31 +437,6 @@ def create_app(
             body(),
             media_type='text/event-stream' if format == 'sse' else 'application/x-ndjson',
             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
-        )
-
-    @app.get('/api/v1/analytics/zones', response_model=ZonesResponse, tags=['analytics'])
-    async def zones(
-        clickhouse: ClickHouseDep,
-        minutes: Annotated[int, Query(ge=1, le=1440)] = 15,
-        limit: Annotated[int, Query(ge=1, le=1000)] = 5,
-    ) -> ZonesResponse:
-        """Busiest H3 cells (by telemetry events, i.e. vehicle-time) over the last `minutes`."""
-        started = time.perf_counter()
-        result = await clickhouse.query(ZONES_SQL, parameters={'minutes': minutes, 'limit': limit})
-        query_ms = (time.perf_counter() - started) * 1000
-        return ZonesResponse(
-            window_minutes=minutes,
-            generated_at=datetime.now(timezone.utc),
-            query_ms=round(query_ms, 2),
-            zones=[
-                Zone(
-                    h3_index=row['h3_index'],
-                    vehicles=row['zone_vehicles'],
-                    events=row['zone_events'],
-                    avg_speed_kmh=row['avg_speed_kmh'],
-                )
-                for row in result.named_results()
-            ],
         )
 
     @app.get('/api/v1/metrics/dlq', response_model=DlqMetrics, tags=['metrics'])

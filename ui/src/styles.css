@@ -168,23 +168,6 @@ body,
   }
 }
 
-.zones {
-  margin: 0;
-  padding-left: 18px;
-  font-size: 12px;
-}
-
-.zones li {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 1px 0;
-}
-
-.zones code {
-  color: #c4b5fd;
-}
-
 .metrics footer {
   margin-top: 10px;
 }

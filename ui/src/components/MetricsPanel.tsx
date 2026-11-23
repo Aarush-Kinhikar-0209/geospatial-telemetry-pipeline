@@ -3,7 +3,6 @@ import { Line, LineChart, ResponsiveContainer, Tooltip, YAxis } from 'recharts';
 import type { StreamStatus } from '../hooks/useVehicleStream';
 import type { Sample } from '../hooks/useSampledHistory';
 import type { FleetStats } from '../lib/fleet';
-import type { Zone } from '../types';
 
 interface MetricsPanelProps {
   stats: FleetStats;
@@ -12,8 +11,6 @@ interface MetricsPanelProps {
   connectMs: number | null;
   updatesPerSec: number;
   fps: number;
-  zones: Zone[];
-  zonesError: string | null;
 }
 
 const STATUS_LABEL: Record<StreamStatus, string> = {
@@ -34,8 +31,8 @@ function Stat({ label, value, testId }: { label: string; value: string; testId?:
   );
 }
 
-// The panel re-renders on every stream flush (~10/s); the chart and zone list
-// only change once a second or slower, so they skip those renders.
+// The panel re-renders on every stream flush (~10/s); the chart only changes
+// once a second, so it skips those renders.
 const SpeedChart = memo(function SpeedChart({ history }: { history: Sample[] }) {
   return (
     <div className="chart" aria-label="Average fleet speed, last 60 seconds">
@@ -62,23 +59,8 @@ const SpeedChart = memo(function SpeedChart({ history }: { history: Sample[] }) 
   );
 });
 
-const ZoneList = memo(function ZoneList({ zones }: { zones: Zone[] }) {
-  return (
-    <ol className="zones" data-testid="zones">
-      {zones.slice(0, 5).map((zone) => (
-        <li key={zone.h3_index}>
-          <code>{zone.h3_index}</code>
-          <span>
-            {zone.vehicles} veh · {zone.events} ev
-          </span>
-        </li>
-      ))}
-    </ol>
-  );
-});
-
 export function MetricsPanel(props: MetricsPanelProps) {
-  const { stats, speedHistory, status, connectMs, updatesPerSec, fps, zones, zonesError } = props;
+  const { stats, speedHistory, status, connectMs, updatesPerSec, fps } = props;
 
   return (
     <section className="panel metrics" aria-label="Fleet metrics">
@@ -97,10 +79,6 @@ export function MetricsPanel(props: MetricsPanelProps) {
       </div>
 
       <SpeedChart history={speedHistory} />
-
-      <h3>Busiest zones · 15 min</h3>
-      {zonesError && <p className="warning">Zones unavailable: {zonesError}</p>}
-      <ZoneList zones={zones} />
 
       <footer className="caption">
         {stats.lowBattery} low battery · first data in{' '}

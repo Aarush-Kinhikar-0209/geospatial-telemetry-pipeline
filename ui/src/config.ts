@@ -25,7 +25,6 @@ export const INITIAL_VIEW_STATE = {
 
 export const endpoints = {
   stream: `${API_BASE}/api/v1/stream/vehicles`,
-  zones: `${API_BASE}/api/v1/analytics/zones?minutes=15&limit=100`,
   dlq: `${API_BASE}/api/v1/metrics/dlq?window=3&history=60`,
   health: `${API_BASE}/api/v1/health`,
 };

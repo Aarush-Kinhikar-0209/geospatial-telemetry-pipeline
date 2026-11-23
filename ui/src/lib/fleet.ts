@@ -102,10 +102,3 @@ export function speedColor(speedKmh: number): Rgb {
   const t = Math.min(Math.max(speedKmh / 80, 0), 1);
   return t < 0.5 ? lerp(SLOW, CRUISE, t * 2) : lerp(CRUISE, FAST, (t - 0.5) * 2);
 }
-
-/** Zone fill from transparent blue to opaque magenta by relative activity (0-1). */
-export function zoneColor(intensity: number): [number, number, number, number] {
-  const t = Math.min(Math.max(intensity, 0), 1);
-  const [r, g, b] = lerp([59, 130, 246], [217, 70, 239], t);
-  return [r, g, b, Math.round(40 + 160 * t)];
-}

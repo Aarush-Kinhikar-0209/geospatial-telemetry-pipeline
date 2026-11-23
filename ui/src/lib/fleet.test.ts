@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { VehicleState } from '../types';
-import { FleetStore, fleetStats, parseVehicles, speedColor, zoneColor } from './fleet';
+import { FleetStore, fleetStats, parseVehicles, speedColor } from './fleet';
 
 function vehicle(id: string, overrides: Partial<VehicleState> = {}): VehicleState {
   return {
@@ -86,10 +86,5 @@ describe('colors', () => {
     expect(speedColor(80)).toEqual([34, 197, 94]);
     expect(speedColor(-5)).toEqual(speedColor(0));
     expect(speedColor(500)).toEqual(speedColor(80));
-  });
-
-  it('makes busier zones more opaque', () => {
-    expect(zoneColor(1)[3]).toBeGreaterThan(zoneColor(0.1)[3]);
-    expect(zoneColor(2)).toEqual(zoneColor(1));
   });
 });

@@ -20,7 +20,7 @@ export default defineConfig({
       output: {
         manualChunks: {
           maplibre: ['maplibre-gl', 'react-map-gl/maplibre'],
-          deck: ['@deck.gl/core', '@deck.gl/layers', '@deck.gl/geo-layers', '@deck.gl/react'],
+          deck: ['@deck.gl/core', '@deck.gl/layers', '@deck.gl/react'],
           charts: ['recharts'],
         },
       },

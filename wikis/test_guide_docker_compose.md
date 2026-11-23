@@ -130,9 +130,6 @@ curl -s http://localhost:8000/api/v1/vehicles | head -c 300
 curl -N http://localhost:8000/api/v1/stream/vehicles
 curl -N "http://localhost:8000/api/v1/stream/vehicles?format=ndjson"
 
-# Top 5 busiest H3 cells over 15 minutes; query_ms is the ClickHouse time (target < 50 ms)
-curl -s "http://localhost:8000/api/v1/analytics/zones?minutes=15&limit=5"
-
 # DLQ rate over the last 10 s plus a 60 s per-second series
 curl -s "http://localhost:8000/api/v1/metrics/dlq?window=10&history=60"
 ```
@@ -148,7 +145,7 @@ python api/loadtest_sse.py --clients 100 --seconds 20 --procs 8
 
 Reference run (WSL2, 10 cores): 50 clients p95 = 88 ms; 100 clients all connected, p95 = 130 ms (the load generator itself becomes the bottleneck when it runs on the same machine).
 
-**Database drop:** `docker compose stop clickhouse` makes `/analytics/zones` return `503` with `{"detail": ..., "dependency": "clickhouse"}`; `docker compose stop redis` does the same for the Redis-backed routes. Open SSE streams stay connected through a Redis outage and resume when it returns. Start the service again and the endpoints recover without restarting the API.
+**Database drop:** `docker compose stop clickhouse` makes `/health` return `503` with `"clickhouse": false`. `docker compose stop redis` makes the Redis-backed routes return `503` with `"dependency": "redis"`. Open SSE streams stay connected through a Redis outage and resume when it returns. Start the service again and the endpoints recover without restarting the API.
 
 ### 8. Live Map UI
 
@@ -158,7 +155,6 @@ Open http://localhost:3000 (nginx serves the bundle and proxies `/api`, includin
 |-------|----------|
 | Render | Dark base map of Mumbai, no "Base map" error banner, no console errors |
 | Data binding | Fleet panel shows `Live` and ~`VEHICLE_COUNT` active vehicles; markers glide between updates |
-| Zones | Purple H3 cells on the map; top 5 listed under "Busiest zones" |
 | Time to live data | Footer "first data in … ms" < 1000 ms |
 | FPS | Fleet panel FPS ~60 (at the display's refresh rate) |
 | DLQ monitor | `Nominal` at ~5%; Redis / ClickHouse / Feed dots green |

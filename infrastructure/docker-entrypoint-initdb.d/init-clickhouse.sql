@@ -9,7 +9,6 @@
 --   * telemetry_events   - raw validated telemetry (ReplacingMergeTree)
 --   * speed_rollups      - tumbling-window speed partials (AggregatingMergeTree)
 --   * speed_rollups_avg  - view that finalizes the per-window average
---   * zone_activity      - per-minute H3 cell activity (fed by zone_activity_mv)
 -- ---------------------------------------------------------------------------
 
 CREATE DATABASE IF NOT EXISTS fleet_analytics;
@@ -46,30 +45,6 @@ CREATE TABLE IF NOT EXISTS speed_rollups (
     h3_index       SimpleAggregateFunction(anyLast, String)
 ) ENGINE = AggregatingMergeTree()
 ORDER BY (vehicle_id, window_start);
-
--- Per-minute activity per H3 cell, maintained on every telemetry_events insert,
--- so the API ranks busy zones from a few thousand pre-aggregated rows instead
--- of scanning raw events. Rows replayed after a processor crash can inflate
--- `events` (the view sees every insert) but not the distinct `vehicles` count.
-CREATE TABLE IF NOT EXISTS zone_activity (
-    minute     DateTime('UTC'),
-    h3_index   String,
-    vehicles   AggregateFunction(uniq, String),
-    events     SimpleAggregateFunction(sum, UInt64),
-    speed_sum  SimpleAggregateFunction(sum, Float64)
-) ENGINE = AggregatingMergeTree()
-ORDER BY (minute, h3_index)
-TTL minute + INTERVAL 7 DAY;
-
-CREATE MATERIALIZED VIEW IF NOT EXISTS zone_activity_mv TO zone_activity AS
-SELECT
-    toStartOfMinute(timestamp) AS minute,
-    h3_index,
-    uniqState(vehicle_id)      AS vehicles,
-    count()                    AS events,
-    sum(speed_kmh)             AS speed_sum
-FROM telemetry_events
-GROUP BY minute, h3_index;
 
 CREATE VIEW IF NOT EXISTS speed_rollups_avg AS
 SELECT

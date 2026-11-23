@@ -58,7 +58,7 @@ flowchart TD
     CH -- "SQL Queries" --> API_REST
     
     API_SSE -- "Live Coordinates<br/>(NDJSON)" --> UI
-    API_REST -- "Zone Heatmaps<br/>(JSON)" --> UI
+    API_REST -- "DLQ metrics and health<br/>(JSON)" --> UI
 ```
 
 ---
@@ -79,20 +79,20 @@ flowchart TD
 * **Role:** The core transformation engine. Validates incoming records against expected schemas.
 * **Operations:**
   * **Validation:** Routes records failing schema checks strictly to the DLQ.
-  * **Geospatial Indexing:** Converts `(lat, lon)` floats into H3 hexagon string IDs (resolution 9) for efficient spatial grouping.
+  * **Geospatial Indexing:** Converts `(lat, lon)` floats into H3 hexagon string IDs (resolution 9) and stores them on each telemetry event.
   * **Windowing:** Calculates rolling averages (e.g., speed, battery drop rate) using a 10-second tumbling window.
 
 ### 4. Storage Architecture (CQRS Pattern)
 We use a polyglot persistence strategy to handle the differing read patterns of the UI:
 * **Redis (Hot State):** Stores the absolute latest position and speed of every vehicle. The API requires $O(1)$ lookups to stream current locations. Storing this in an analytical database would result in expensive, unnecessary row updates.
-* **ClickHouse (Cold/Analytical State):** An open-source columnar OLAP database. Used to store the windowed aggregates and historical paths. Designed for massive read performance on queries like: *"What was the P95 speed in hexagon X over the last 15 minutes?"*
+* **ClickHouse (Cold/Analytical State):** An open-source columnar OLAP database. Used to store the windowed speed aggregates and historical telemetry paths.
 
 ### 5. Serving Layer: FastAPI
 * **SSE (Server-Sent Events):** A unidirectional websocket alternative perfectly suited for streaming live telemetry to the browser without polling overhead.
-* **REST Endpoints:** Standard JSON endpoints for querying historical analytics and the DLQ error rate.
+* **REST Endpoints:** Standard JSON endpoints for the vehicle snapshot, the DLQ error rate, and dependency health.
 
 ### 6. Presentation: Next.js + Deck.gl
-* **Deck.gl:** A WebGL-powered framework developed by Uber. It can render hundreds of thousands of moving markers (`IconLayer`) and geospatial polygons (`H3HexagonLayer`) at 60 FPS, far outperforming standard DOM-based mapping libraries (like Leaflet) for streaming use cases.
+* **Deck.gl:** A WebGL-powered framework developed by Uber. It renders the moving fleet (`ScatterplotLayer`) on the GPU, far outperforming DOM-based mapping libraries (like Leaflet) for a live stream.
 
 ---
 

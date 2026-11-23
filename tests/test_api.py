@@ -84,34 +84,6 @@ def test_vehicles_snapshot(api, server):
     assert body[0] == {**VEHICLE, 'lat': 18.93, 'lon': 72.82, 'speed_kmh': 45.2, 'battery_pct': 82}
 
 
-def test_zones_contract(api, server):
-    rows = [
-        {
-            'h3_index': '89608b0aabbffff',
-            'zone_vehicles': 7,
-            'zone_events': 420,
-            'avg_speed_kmh': 41.5,
-        }
-    ]
-    clickhouse = FakeClickHouse(rows)
-    with make_client(api, server, clickhouse) as client:
-        response = client.get('/api/v1/analytics/zones')
-    assert response.status_code == 200
-    body = response.json()
-    assert body['window_minutes'] == 15
-    assert body['zones'] == [
-        {'h3_index': '89608b0aabbffff', 'vehicles': 7, 'events': 420, 'avg_speed_kmh': 41.5}
-    ]
-    assert {'generated_at', 'query_ms'} <= set(body)
-    assert clickhouse.queries[0][1] == {'minutes': 15, 'limit': 5}
-
-
-@pytest.mark.parametrize('query', ['minutes=0', 'minutes=99999', 'limit=0', 'limit=abc'])
-def test_zones_rejects_bad_parameters(api, server, query):
-    with make_client(api, server, FakeClickHouse()) as client:
-        assert client.get(f'/api/v1/analytics/zones?{query}').status_code == 422
-
-
 def test_dlq_metrics(api, server):
     now = int(time.time())
     seed(
@@ -148,14 +120,6 @@ def test_redis_down_returns_503(api, server, path):
     assert response.json()['dependency'] == 'redis'
 
 
-@pytest.mark.parametrize('clickhouse', [None, FakeClickHouse(fail=True)])
-def test_clickhouse_down_returns_503(api, server, clickhouse):
-    with make_client(api, server, clickhouse) as client:
-        response = client.get('/api/v1/analytics/zones')
-    assert response.status_code == 503
-    assert response.json()['dependency'] == 'clickhouse'
-
-
 def test_health(api, server):
     with make_client(api, server, FakeClickHouse()) as client:
         ok = client.get('/api/v1/health')
@@ -177,7 +141,7 @@ def test_openapi_docs(api, server):
         paths = client.get('/openapi.json').json()['paths']
     assert {
         '/api/v1/stream/vehicles',
-        '/api/v1/analytics/zones',
+        '/api/v1/vehicles',
         '/api/v1/metrics/dlq',
     } <= set(paths)
 

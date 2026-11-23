@@ -2,13 +2,10 @@ import { lazy, Suspense, useMemo, useState } from 'react';
 import { DlqMonitor } from './components/DlqMonitor';
 import { MetricsPanel } from './components/MetricsPanel';
 import { useFps } from './hooks/useFps';
-import { useDlqMetrics, useHealth, useZones } from './hooks/usePipeline';
+import { useDlqMetrics, useHealth } from './hooks/usePipeline';
 import { useSampledHistory } from './hooks/useSampledHistory';
 import { useVehicleStream } from './hooks/useVehicleStream';
 import { fleetStats } from './lib/fleet';
-import type { Zone } from './types';
-
-const NO_ZONES: Zone[] = [];
 
 // deck.gl + MapLibre are most of the bundle; loading them lazily lets the SSE
 // stream and panels start while the map code is still downloading.
@@ -18,7 +15,6 @@ const FleetMap = lazy(() =>
 
 export default function App() {
   const stream = useVehicleStream();
-  const zones = useZones();
   const dlq = useDlqMetrics();
   const health = useHealth();
   const fps = useFps();
@@ -30,11 +26,7 @@ export default function App() {
   return (
     <main className="app">
       <Suspense fallback={null}>
-        <FleetMap
-          vehicles={stream.vehicles}
-          zones={zones.data?.zones ?? NO_ZONES}
-          onMapError={setMapError}
-        />
+        <FleetMap vehicles={stream.vehicles} onMapError={setMapError} />
       </Suspense>
 
       <h1 className="title">Real-Time Fleet Analytics</h1>
@@ -46,8 +38,6 @@ export default function App() {
         connectMs={stream.connectMs}
         updatesPerSec={stream.updatesPerSec}
         fps={fps}
-        zones={zones.data?.zones ?? NO_ZONES}
-        zonesError={zones.error}
       />
 
       <DlqMonitor

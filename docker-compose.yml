@@ -151,7 +151,7 @@ services:
         condition: service_healthy
 
   # -------------------------------------------------------------------------
-  # Serving API: FastAPI (SSE live feed, zone analytics, DLQ metrics)
+  # Serving API: FastAPI (SSE live feed, DLQ metrics, health)
   # Swagger UI at http://localhost:8000/docs
   # -------------------------------------------------------------------------
   api:

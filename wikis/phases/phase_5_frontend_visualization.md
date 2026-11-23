@@ -8,7 +8,6 @@ The final step is translating the backend data engineering into a compelling vis
 * **Mapping Engine:** Deck.gl for data visualization layers overlaid on a Base Map (Mapbox GL JS or MapLibre).
 * **Layers:**
   * `IconLayer` or `ScatterplotLayer`: Represents live vehicles (coordinates updated via the FastAPI SSE stream).
-  * `H3HexagonLayer`: Displays zone density based on REST API aggregates from ClickHouse.
 * **Metrics Dashboard:** Uses a lightweight charting library (like Tremor or Recharts) floating on the screen to show total active vehicles, average fleet speed, and a flashing "DLQ Monitor" for dropped data.
 
 ## Ways to Test

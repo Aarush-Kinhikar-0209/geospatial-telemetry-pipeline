@@ -11,20 +11,6 @@ export interface VehicleState {
   processed_at: string;
 }
 
-export interface Zone {
-  h3_index: string;
-  vehicles: number;
-  events: number;
-  avg_speed_kmh: number;
-}
-
-export interface ZonesResponse {
-  window_minutes: number;
-  generated_at: string;
-  query_ms: number;
-  zones: Zone[];
-}
-
 export interface DlqPoint {
   ts: number;
   processed: number;

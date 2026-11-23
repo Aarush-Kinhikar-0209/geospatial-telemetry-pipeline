@@ -1,46 +1,24 @@
 import type { PickingInfo } from '@deck.gl/core';
-import { H3HexagonLayer } from '@deck.gl/geo-layers';
 import { ScatterplotLayer } from '@deck.gl/layers';
 import DeckGL from '@deck.gl/react';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { useMemo } from 'react';
 import { Map } from 'react-map-gl/maplibre';
 import { INITIAL_VIEW_STATE, MAP_STYLE_URL, POSITION_TRANSITION_MS } from '../config';
-import { speedColor, zoneColor, type TrackedVehicle } from '../lib/fleet';
-import type { Zone } from '../types';
+import { speedColor, type TrackedVehicle } from '../lib/fleet';
 
 interface FleetMapProps {
   vehicles: TrackedVehicle[];
-  zones: Zone[];
   onMapError?: (message: string) => void;
 }
 
-function tooltip({ object, layer }: PickingInfo<TrackedVehicle | Zone>) {
+function tooltip({ object }: PickingInfo<TrackedVehicle>) {
   if (!object) return null;
-  if (layer?.id === 'vehicles') {
-    const v = object as TrackedVehicle;
-    return `${v.vehicle_id}\n${v.speed_kmh.toFixed(1)} km/h · battery ${v.battery_pct}%`;
-  }
-  const z = object as Zone;
-  return `Zone ${z.h3_index}\n${z.vehicles} vehicles · ${z.events} events (15 min)\navg ${z.avg_speed_kmh.toFixed(1)} km/h`;
+  return `${object.vehicle_id}\n${object.speed_kmh.toFixed(1)} km/h · battery ${object.battery_pct}%`;
 }
 
 /** Presentation only: receives data from hooks, owns no fetching. */
-export function FleetMap({ vehicles, zones, onMapError }: FleetMapProps) {
-  const busiest = useMemo(() => zones.reduce((max, z) => Math.max(max, z.vehicles), 1), [zones]);
-
+export function FleetMap({ vehicles, onMapError }: FleetMapProps) {
   const layers = [
-    new H3HexagonLayer<Zone>({
-      id: 'zones',
-      data: zones,
-      getHexagon: (z) => z.h3_index,
-      getFillColor: (z) => zoneColor(z.vehicles / busiest),
-      getLineColor: [255, 255, 255, 80],
-      lineWidthMinPixels: 1,
-      extruded: false,
-      pickable: true,
-      updateTriggers: { getFillColor: busiest },
-    }),
     new ScatterplotLayer<TrackedVehicle>({
       id: 'vehicles',
       data: vehicles,

@@ -10,14 +10,14 @@
 
 An end-to-end, real-time data engineering pipeline demonstrating distributed stream processing, stateful windowing, and resilient architecture patterns (Dead Letter Queues). 
 
-This project simulates a live fleet of delivery vehicles, processes their telemetry at high throughput, and serves live positions plus fast H3 zone aggregates to a hardware-accelerated frontend.
+This project simulates a live fleet of delivery vehicles, processes their telemetry at high throughput, and serves live positions to a hardware-accelerated map.
 
 ## 🌟 Key Engineering Features
 
 *   **Resilient Streaming (DLQ):** Intentionally injects malformed JSON and schema violations to demonstrate robust Dead Letter Queue routing without dropping the pipeline.
 *   **Stateful Windowing:** Computes tumbling window aggregations (e.g., rolling speed averages) in real-time.
 *   **Multi-Sink Architecture:** Routes "hot" state (current location) to Redis for $O(1)$ lookups, and "cold/analytical" state to ClickHouse for lightning-fast OLAP queries.
-*   **Spatial Indexing:** Encodes raw latitude/longitude coordinates into H3 hexagonal grids on the fly for efficient geographic aggregations.
+*   **Spatial Indexing:** Encodes each telemetry position into an H3 cell and stores it with the ClickHouse history.
 
 ## 🏗️ Architecture
 
@@ -28,7 +28,7 @@ graph TD
     B --> C["Stream Processor<br/>(Python asyncio + aiokafka)"]
     
     C -->|Malformed Pings| D["Dead Letter Queue (DLQ)"]
-    C -->|Window aggregates & H3 cells| E["ClickHouse<br/>(OLAP Storage)"]
+    C -->|Windowed speed history| E["ClickHouse<br/>(OLAP Storage)"]
     C -->|Latest Coordinates| F["Redis<br/>(In-Memory Cache)"]
     
     E --> G["FastAPI Backend"]
@@ -112,7 +112,7 @@ To use your own provider, point `VITE_MAP_STYLE_URL` at any **MapLibre-compatibl
 
 **Mapbox:** the UI renders with MapLibre GL, which cannot resolve `mapbox://` style URLs. Either use a MapLibre-compatible provider as above, or switch `ui/src/components/FleetMap.tsx` from `react-map-gl/maplibre` to `react-map-gl/mapbox`, add the `mapbox-gl` package, and pass your token via `mapboxAccessToken` (read it from a `VITE_MAPBOX_TOKEN` variable in `ui/.env.local`).
 
-If the style fails to load, the UI shows a red "Base map" banner; vehicles and zones still render on a dark background.
+If the style fails to load, the UI shows a red "Base map" banner; vehicle markers still render on a dark background.
 
 ## 🧪 Chaos Engineering & DLQ
 
