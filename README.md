@@ -1,55 +1,46 @@
 # 🏎️ Real-Time Geospatial Fleet Analytics Engine
 
-![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=for-the-badge&logo=docker&logoColor=white)
-![Apache Kafka](https://img.shields.io/badge/Apache%20Kafka-000?style=for-the-badge&logo=apachekafka)
-![ClickHouse](https://img.shields.io/badge/ClickHouse-FFCC01?style=for-the-badge&logo=clickhouse&logoColor=white)
-![Redis](https://img.shields.io/badge/redis-%23DD0031.svg?style=for-the-badge&logo=redis&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)
-![React](https://img.shields.io/badge/react-%2320232a.svg?style=for-the-badge&logo=react&logoColor=%2361DAFB)
-![Vite](https://img.shields.io/badge/vite-%23646CFF.svg?style=for-the-badge&logo=vite&logoColor=white)
+An end-to-end streaming data pipeline. It simulates a fleet of delivery vehicles in Mumbai, processes their telemetry, and shows live positions on a map. It demonstrates stream processing, windowed aggregation, and dead-letter queues (DLQ).
 
-An end-to-end, real-time data engineering pipeline demonstrating distributed stream processing, stateful windowing, and resilient architecture patterns (Dead Letter Queues). 
+## 🌟 Key Features
 
-This project simulates a live fleet of delivery vehicles, processes their telemetry at high throughput, and serves live positions to a hardware-accelerated map.
-
-## 🌟 Key Engineering Features
-
-*   **Resilient Streaming (DLQ):** Intentionally injects malformed JSON and schema violations to demonstrate robust Dead Letter Queue routing without dropping the pipeline.
-*   **Stateful Windowing:** Computes tumbling window aggregations (e.g., rolling speed averages) in real-time.
-*   **Multi-Sink Architecture:** Routes "hot" state (current location) to Redis for $O(1)$ lookups, and "cold/analytical" state to ClickHouse for lightning-fast OLAP queries.
-*   **Spatial Indexing:** Encodes each telemetry position into an H3 cell and stores it with the ClickHouse history.
+*   **Dead-letter queue:** malformed JSON and schema violations are routed to a DLQ without stopping the consumer.
+*   **Windowed aggregation:** the processor computes the average speed per vehicle over 10-second tumbling windows.
+*   **Two stores:** Redis holds each vehicle's latest position for fast lookups; ClickHouse holds the history and the speed rollups.
+*   **Spatial indexing:** each position is stored with its H3 cell (resolution 9).
 
 ## 🏗️ Architecture
 
 ```mermaid
 graph TD
     A["Telemetry Generator<br/>(Simulates up to 200 Vehicles)"] -->|JSON over Kafka protocol| B["Kafka / Redpanda Broker"]
-    
+
     B --> C["Stream Processor<br/>(Python asyncio + aiokafka)"]
-    
+
     C -->|Malformed Pings| D["Dead Letter Queue (DLQ)"]
     C -->|Windowed speed history| E["ClickHouse<br/>(OLAP Storage)"]
     C -->|Latest Coordinates| F["Redis<br/>(In-Memory Cache)"]
-    
+
     E --> G["FastAPI Backend"]
     F --> G
-    
+
     G -->|Server-Sent Events + REST| H["React + deck.gl UI<br/>(Vite, MapLibre)"]
 ```
 
 ## 📂 Repository Structure
 
-*   `docker-compose.yml`: Orchestrates every service (lives at the repository root).
-*   `/infrastructure`: Initialization scripts for ClickHouse.
-*   `/generator`: Python service that simulates fleet movement and injects chaotic/malformed data while a simulation runs.
-*   `/processor`: Stream processing application handling H3 indexing, windowing, DLQ routing, and clearing a finished simulation.
-*   `/api`: FastAPI application serving SSE streams, REST endpoints, and the simulation lifecycle.
-*   `/ui`: React + Vite frontend with deck.gl (WebGL) layers over a MapLibre base map.
-*   `/tests`: Unit and API contract tests for the generator, processor and API (`pytest`). UI unit tests live in `ui/src` (`vitest`).
-*   `/docs`: Reserved for longer write-ups (currently empty).
-*   `/wikis`: Architecture notes, phase briefs, and the Docker Compose test guide.
+*   `docker-compose.yml`: orchestrates every service.
+*   `infrastructure/`: ClickHouse initialization SQL, run on first start.
+*   `generator/`: simulates fleet movement and injects malformed data while a simulation runs.
+*   `processor/`: consumes telemetry, indexes positions, runs the windows and DLQ routing, and clears a finished simulation.
+*   `api/`: FastAPI service with SSE streams, REST endpoints, and simulation control.
+*   `ui/`: React + Vite frontend, with deck.gl layers over a MapLibre base map.
+*   `tests/`: pytest tests for the generator, processor and API. UI unit tests live in `ui/src` (Vitest).
+*   `wikis/`: architecture notes, phase briefs, and the Docker Compose test guide.
 
 ## 🧑‍💻 Local Development
+
+Python 3.10+ and Node 18.18+ are needed for these commands.
 
 ```bash
 python3 -m venv .venv
@@ -59,7 +50,7 @@ pip install -r requirements-dev.txt
 ruff check . && ruff format --check .
 pytest
 
-# UI (Node 18.18+)
+# UI
 cd ui
 npm ci
 npm run typecheck && npm test
@@ -67,7 +58,7 @@ npm run typecheck && npm test
 
 ## 🚀 Quick Start
 
-Ensure you have [Docker](https://docs.docker.com/get-docker/) and Docker Compose installed.
+Requires Docker with Compose v2.
 
 1. **Clone the repository:**
    ```bash
@@ -75,17 +66,16 @@ Ensure you have [Docker](https://docs.docker.com/get-docker/) and Docker Compose
    cd geospatial-telemetry-pipeline
    ```
 
-2. **Spin up the data platform:**
+2. **Create `.env` and start the stack:**
    ```bash
    cp .env.example .env   # set CLICKHOUSE_PASSWORD (and any tuning knobs)
    docker compose up -d --build
    ```
-   *This builds and starts the broker, databases, stream processor, data generator, backend API, and the UI. Keep `.env` in LF line endings; Compose does not strip a trailing `\r` from values.*
+   This builds and starts the broker, databases, stream processor, generator, API and UI. Keep `.env` in LF line endings: Compose does not strip a trailing `\r` from values.
 
    Step-by-step checks are in [`wikis/test_guide_docker_compose.md`](wikis/test_guide_docker_compose.md).
 
-3. **View the Dashboard:**
-   Navigate to `http://localhost:3000`. The stack starts idle; choose a fleet in the **Simulation** panel and press **Start simulation** to see the live map, telemetry metrics, and the DLQ monitor in action (see [Simulations](#-simulations)). The API's Swagger UI is at `http://localhost:8000/docs`.
+3. **Open the dashboard:** go to `http://localhost:3000`. The stack starts idle. Choose a fleet size, interval and chaos rate in the **Simulation** panel, then press **Start simulation** (see [Simulations](#-simulations)). The API's Swagger UI is at `http://localhost:8000/docs`.
 
 4. **(Optional) Run the UI with hot reload:**
    ```bash
@@ -93,10 +83,49 @@ Ensure you have [Docker](https://docs.docker.com/get-docker/) and Docker Compose
    npm ci
    npm run dev   # http://localhost:5173, proxies /api to http://localhost:8000
    ```
+   This needs Node on the host and the API from step 2 still running. Use it only when changing the UI; step 3 serves the built image.
+
+### Is Docker Compose enough?
+
+Yes. `docker compose up -d --build` runs everything the app needs, so Python and Node are not needed on the host for the stack. You need:
+
+*   **Docker with Compose v2.** On Windows, use the Docker engine in WSL and run these commands from a WSL shell.
+*   **A root `.env`** copied from `.env.example`. Compose refuses to start without `CLICKHOUSE_PASSWORD`.
+
+Python (tests and linting) and Node (the Vite dev server) are needed only for the commands in Local Development and step 4.
+
+Check that the stack is up:
+
+```bash
+docker compose ps
+```
+
+`api`, `redis`, `clickhouse`, `redpanda` and `ui` should show `(healthy)`. `generator` and `processor` have no health check, so they show only `Up`. The first build can take several minutes; later starts usually take under a minute.
+
+### Ports and URLs
+
+| Service | Address | Notes |
+|---|---|---|
+| **Dashboard** | http://localhost:3000 | The Docker stack's UI. Open this one. |
+| API and Swagger | http://localhost:8000/docs | REST and SSE; health at `/api/v1/health` |
+| ClickHouse | `localhost:8123` (HTTP), `localhost:9000` (native) | User and password from `.env` |
+| Redis | `localhost:6379` | |
+| Redpanda (Kafka) | `localhost:9092` | For tools on the host |
+| Vite dev server | http://localhost:5173 | Only with `npm run dev` |
+
+### Stop and clean up
+
+```bash
+docker compose stop      # pause: containers stop, data is kept
+docker compose down      # remove containers and the network, data is kept
+docker compose down -v   # also delete the data volumes (Redis, ClickHouse, Redpanda)
+```
+
+`down -v` deletes all stored telemetry and frees disk space. The built images are kept, so the next `up` starts quickly.
 
 ## ▶️ Simulations
 
-Nothing is generated until you start a simulation. The **Simulation** panel takes:
+Nothing is generated until a simulation starts. The **Simulation** panel takes:
 
 | Setting | Range | Default |
 |---|---|---|
@@ -104,11 +133,11 @@ Nothing is generated until you start a simulation. The **Simulation** panel take
 | Interval (s) | 0.1 – 2.0 | 2.0 |
 | Chaos (%) | 0 – 5 (whole number) | 5 |
 
-**Start simulation** runs the fleet for 2 minutes (`SIMULATION_DURATION_SECONDS`) with a countdown. Out-of-range input is flagged in the form and rejected by the API (`422`). Only one simulation runs at a time (`409` otherwise). **Stop & clear data** ends a run early.
+**Start simulation** runs the fleet for 2 minutes (`SIMULATION_DURATION_SECONDS`) with a countdown. The form and the API both reject out-of-range values (the API returns `422`). Only one simulation runs at a time; a second start returns `409`. **Stop & clear data** ends a run early.
 
-**How far vehicles move per ping.** Each ping moves a vehicle by its speed times the interval, multiplied by `MAP_DISTANCE_SCALE` (10 in `generator/main.py`). The scale is presentation only: it makes hops visible on a city-wide map, at the cost of the moved distance no longer matching the reported speed exactly. At 10×, a vehicle in city traffic (5–25 km/h) hops about 1–14 m per ping at a 0.1–0.2 s interval and about 30–140 m at 2 s. The reported speed and battery drain use the true distance, not the scaled one. Set `MAP_DISTANCE_SCALE = 1` in `generator/main.py` for real-world spacing.
+**Movement.** Each ping moves a vehicle by its speed times the time since its last ping, multiplied by `MAP_DISTANCE_SCALE` (10 in `generator/main.py`). The scale is for presentation: it makes movement visible at city zoom, but the distance moved no longer matches the reported speed. At 10×, a vehicle in city traffic (5–25 km/h) moves about 1–14 m per ping at 0.1–0.2 s intervals and about 30–140 m at 2 s. Reported speed and battery drain use the true distance. Set `MAP_DISTANCE_SCALE = 1` for real-world spacing.
 
-When a run ends, **every trace of it is deleted** before a new one can start:
+When a run ends, its telemetry is deleted before the next run can start:
 
 | Store | What is cleared |
 |---|---|
@@ -116,44 +145,43 @@ When a run ends, **every trace of it is deleted** before a new one can start:
 | ClickHouse | `telemetry_events` and `speed_rollups` are truncated |
 | Redis | `vehicle:*` latest states and the per-second `metrics:pipeline:*` counters |
 
-A run ends, and is cleared, when:
+A run ends, and its telemetry is cleared, when:
 
 * the timer reaches zero,
 * you press **Stop & clear data**, or
-* **the page goes away.** While a run is going the page sends a heartbeat every 2 s; if none arrives for `SIMULATION_HEARTBEAT_TIMEOUT_SECONDS` (10 s) because the tab was closed, the browser crashed, or the connection dropped, the API ends the run and clears the data. A page reload does not end it: the countdown picks up where it was.
+* **the page goes away.** The page sends a heartbeat every 2 s during a run. If none arrives for `SIMULATION_HEARTBEAT_TIMEOUT_SECONDS` (10 s), for example because the tab was closed or the browser crashed, the API ends the run and clears it. Reloading the page does not end the run; the countdown resumes.
 
-How it fits together: the API owns the lifecycle (`running → stopping → cleaning → idle`) and records it in Redis (`simulation:state`). The generator idles until a run appears, produces for it, and acknowledges once it has stopped and flushed. The processor then discards its in-memory windows, clears the three stores, and acknowledges. Because the processor does the clearing on its own consumer loop, nothing it buffered can be written back after the wipe. Control state lives in Redis, so an API, generator, or processor restart resumes the lifecycle instead of losing it. Endpoints: `GET /api/v1/simulation`, `POST /api/v1/simulation/{start,stop,heartbeat}`.
+**How it works.** The API owns the run lifecycle (`running → stopping → cleaning → idle`) and stores it in Redis under `simulation:state`. The generator produces while a run is active and acknowledges once it has flushed. The processor then discards its windows, clears the three stores, and acknowledges. Its clearing runs on the same consumer loop, so nothing it buffered can be written after the wipe. The state lives in Redis, so restarting a service resumes the lifecycle. Endpoints: `GET /api/v1/simulation` and `POST /api/v1/simulation/{start,stop,heartbeat}`.
 
-## 🗺️ Base Map & API Keys
+## 🗺️ Base Map
 
-The map works out of the box with the keyless [CARTO Dark Matter](https://github.com/CartoDB/basemap-styles) style, so no key is required.
+The map uses the keyless [CARTO Dark Matter](https://github.com/CartoDB/basemap-styles) style by default.
 
-To use your own provider, point `VITE_MAP_STYLE_URL` at any **MapLibre-compatible** style JSON. For example, with a free [MapTiler](https://cloud.maptiler.com/account/keys/) key:
+To use another provider, set `VITE_MAP_STYLE_URL` to any **MapLibre-compatible** style JSON. For example, with a [MapTiler](https://cloud.maptiler.com/account/keys/) key:
 
-* **Dev server:** create `ui/.env.local` (gitignored; see `ui/.env.example`):
-  ```bash
-  VITE_MAP_STYLE_URL=https://api.maptiler.com/maps/dataviz-dark/style.json?key=YOUR_MAPTILER_KEY
-  ```
-  then restart `npm run dev`.
-* **Docker:** put the same line in the root `.env` and rebuild the image (Vite bakes `VITE_*` values in at build time):
-  ```bash
-  docker compose up -d --build ui
-  ```
+*   **Dev server:** put the line in `ui/.env.local` (gitignored; see `ui/.env.example`), then restart `npm run dev`:
+    ```bash
+    VITE_MAP_STYLE_URL=https://api.maptiler.com/maps/dataviz-dark/style.json?key=YOUR_MAPTILER_KEY
+    ```
+*   **Docker:** put the same line in the root `.env`, then rebuild the UI. Vite bakes `VITE_*` values in at build time:
+    ```bash
+    docker compose up -d --build ui
+    ```
 
-**Mapbox:** the UI renders with MapLibre GL, which cannot resolve `mapbox://` style URLs. Either use a MapLibre-compatible provider as above, or switch `ui/src/components/FleetMap.tsx` from `react-map-gl/maplibre` to `react-map-gl/mapbox`, add the `mapbox-gl` package, and pass your token via `mapboxAccessToken` (read it from a `VITE_MAPBOX_TOKEN` variable in `ui/.env.local`).
-
-If the style fails to load, the UI shows a red "Base map" banner; vehicle markers still render on a dark background.
+Mapbox `mapbox://` style URLs are not supported, because the UI renders with MapLibre GL. If the style fails to load, the UI shows a red "Base map" banner.
 
 ## 🧪 Chaos Engineering & DLQ
 
-The generator marks an exact share of payloads as invalid; you choose it (0-5%) when starting a simulation. At 5% the DLQ monitor reports about 5% and stays in the green **Nominal** state. Bad payloads are quarantined without stopping the consumer.
+Each simulation's chaos rate (0–5%) sets the exact share of invalid payloads. At 5% the DLQ monitor stays in the green **Nominal** state. Bad payloads are quarantined without stopping the consumer.
 
-The monitor turns red and flashes **DLQ spike** when the dead-lettered share over the last 3 seconds reaches `VITE_DLQ_ALERT_RATIO` (default `0.1`, baked into the UI image at build time). The simulation form stops at 5%, so force a spike with a standalone generator that is configured from the environment instead:
+The monitor turns red and shows **DLQ spike** when the dead-lettered share over the last 3 seconds reaches `VITE_DLQ_ALERT_RATIO` (default `0.1`, baked into the UI image at build time). The simulation form stops at 5%, so to force a spike, run a standalone generator configured from the environment:
+
 ```bash
 docker compose run --rm -e CHAOS_PERCENTAGE=50 -e VEHICLE_COUNT=50 -e MESSAGE_INTERVAL=0.5 \
-  generator python main.py --standalone   # monitor turns red within ~2 s; Ctrl-C to stop
+  generator python main.py --standalone   # Ctrl-C to stop
 ```
-That traffic is not part of a simulation, so it is cleared by the next simulation's cleanup (or `docker compose down -v`).
+
+This traffic is not part of a simulation. The next simulation's cleanup clears it, or you can run `docker compose down -v`.
 
 ## 🛠️ Built With
 
