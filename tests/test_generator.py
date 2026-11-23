@@ -26,8 +26,25 @@ def test_clean_payloads_match_schema(gen):
     for _, message, is_chaos in produce_batch(gen, 2000):
         assert not is_chaos
         payload = gen.TelemetryPayload.model_validate_json(message)
-        assert gen.LAT_MIN <= payload.lat <= gen.LAT_MAX
-        assert gen.LON_MIN <= payload.lon <= gen.LON_MAX
+        assert gen.on_land(payload.lat, payload.lon)
+
+
+def test_land_polygon_excludes_the_sea(gen):
+    assert gen.on_land(18.94, 72.835)  # Fort, on the peninsula
+    assert gen.on_land(19.12, 72.85)  # Andheri
+    assert not gen.on_land(18.95, 72.75)  # Arabian Sea, west of the coast
+    assert not gen.on_land(18.85, 72.83)  # open water south of Colaba
+    assert not gen.on_land(18.95, 72.90)  # Mumbai Harbour
+
+
+def test_vehicles_stay_on_land(gen):
+    gen.CHAOS_PERCENTAGE = 0
+    g = gen.TelemetryGenerator(stdout=True)
+    g.initialize_vehicles()
+    for _ in range(50):
+        for vid, state in g.vehicles.items():
+            payload = g.generate_payload(vid, state)
+            assert gen.on_land(payload['lat'], payload['lon'])
 
 
 def test_clean_payload_has_documented_shape(gen):

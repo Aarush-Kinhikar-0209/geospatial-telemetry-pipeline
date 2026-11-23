@@ -2,7 +2,7 @@
 """
 Phase 2: Synthetic Telemetry Generator
 
-Simulates a fleet of delivery vehicles moving within a bounding box,
+Simulates a fleet of delivery vehicles moving on land inside Mumbai,
 generating JSON telemetry, and streaming it into Redpanda (Kafka-compatible).
 
 Usage:
@@ -39,11 +39,29 @@ TOPIC: str = os.getenv('TOPIC', 'telemetry_raw')
 MESSAGE_INTERVAL: float = float(os.getenv('MESSAGE_INTERVAL', '0.2'))
 METRICS_INTERVAL: float = 10.0
 
-# Bounding box around Mumbai (matches the example payload in the wiki).
-LAT_MIN: float = 18.80
-LAT_MAX: float = 19.10
-LON_MIN: float = 72.70
-LON_MAX: float = 73.00
+# Mumbai city, traced inland of the Arabian Sea on the west and Mumbai Harbour /
+# Thane Creek on the east. A rectangle around the city covers open water; this
+# polygon does not. Vertices are (lat, lon), ordered around the boundary.
+MUMBAI_LAND: list[tuple[float, float]] = [
+    (18.912, 72.830),  # Colaba
+    (18.948, 72.828),  # Marine Drive
+    (19.005, 72.826),  # Worli
+    (19.060, 72.832),  # Bandra
+    (19.110, 72.836),  # Juhu
+    (19.160, 72.836),  # Versova
+    (19.210, 72.842),  # Malad
+    (19.252, 72.858),  # Dahisar
+    (19.248, 72.910),  # northern suburbs
+    (19.175, 72.940),  # Mulund, west of the creek
+    (19.085, 72.905),  # Ghatkopar
+    (19.035, 72.872),  # Sion
+    (18.975, 72.848),  # Parel
+    (18.925, 72.838),  # Fort
+]
+LAT_MIN: float = min(lat for lat, _ in MUMBAI_LAND)
+LAT_MAX: float = max(lat for lat, _ in MUMBAI_LAND)
+LON_MIN: float = min(lon for _, lon in MUMBAI_LAND)
+LON_MAX: float = max(lon for _, lon in MUMBAI_LAND)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,6 +105,31 @@ def validate_config() -> None:
         )
 
 
+def on_land(lat: float, lon: float) -> bool:
+    """True when the point is inside MUMBAI_LAND (ray cast along longitude)."""
+    inside = False
+    previous = MUMBAI_LAND[-1]
+    for vertex in MUMBAI_LAND:
+        lat_i, lon_i = vertex
+        lat_j, lon_j = previous
+        if (lat_i > lat) != (lat_j > lat):
+            crossing = (lon_j - lon_i) * (lat - lat_i) / (lat_j - lat_i) + lon_i
+            if lon < crossing:
+                inside = not inside
+        previous = vertex
+    return inside
+
+
+def random_land_point() -> tuple[float, float]:
+    """A uniformly chosen point inside the land polygon."""
+    for _ in range(10_000):
+        lat = random.uniform(LAT_MIN, LAT_MAX)
+        lon = random.uniform(LON_MIN, LON_MAX)
+        if on_land(lat, lon):
+            return lat, lon
+    raise RuntimeError('failed to place a point inside the Mumbai land polygon')
+
+
 def chaos_block() -> list[bool]:
     """
     A shuffled block of messages in which exactly CHAOS_PERCENTAGE are chaos.
@@ -124,12 +167,13 @@ class TelemetryGenerator:
     # -- lifecycle ----------------------------------------------------------
 
     def initialize_vehicles(self) -> None:
-        """Place each vehicle at a random position inside the bounding box."""
+        """Place each vehicle at a random position on land inside Mumbai."""
         for i in range(VEHICLE_COUNT):
             vid = f'v-{i + 1:03d}'
+            lat, lon = random_land_point()
             self.vehicles[vid] = {
-                'lat': random.uniform(LAT_MIN, LAT_MAX),
-                'lon': random.uniform(LON_MIN, LON_MAX),
+                'lat': lat,
+                'lon': lon,
                 'speed_kmh': random.uniform(0, 80),
                 'battery_pct': random.randint(20, 100),
             }
@@ -140,9 +184,13 @@ class TelemetryGenerator:
         """Advance a vehicle's random walk and build a clean payload."""
         now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
-        # Bounding-box random walk.
-        state['lat'] = max(LAT_MIN, min(LAT_MAX, state['lat'] + random.uniform(-0.005, 0.005)))
-        state['lon'] = max(LON_MIN, min(LON_MAX, state['lon'] + random.uniform(-0.005, 0.005)))
+        # Random walk that stays inside the land polygon. A step into the sea
+        # is discarded, so the vehicle holds its last on-land position.
+        lat = state['lat'] + random.uniform(-0.005, 0.005)
+        lon = state['lon'] + random.uniform(-0.005, 0.005)
+        if on_land(lat, lon):
+            state['lat'] = lat
+            state['lon'] = lon
         state['speed_kmh'] = max(0, min(120, state['speed_kmh'] + random.uniform(-5, 5)))
         state['battery_pct'] = max(0, min(100, state['battery_pct'] + random.randint(-1, 1)))
 

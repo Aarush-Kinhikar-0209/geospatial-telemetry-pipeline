@@ -16,9 +16,9 @@ export const STREAM_FLUSH_MS = 100;
 export const POSITION_TRANSITION_MS = 300;
 
 export const INITIAL_VIEW_STATE = {
-  longitude: 72.85,
-  latitude: 18.95,
-  zoom: 10.6,
+  longitude: 72.88,
+  latitude: 19.08,
+  zoom: 11,
   pitch: 0,
   bearing: 0,
 };
