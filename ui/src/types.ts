@@ -34,3 +34,30 @@ export interface Health {
   sse_clients: number;
   live_feed: boolean;
 }
+
+export interface SimulationConfig {
+  vehicles: number;
+  interval_seconds: number;
+  chaos_percent: number;
+}
+
+export type SimulationStatus = 'idle' | 'running' | 'stopping' | 'cleaning';
+
+export type SimulationReason = 'completed' | 'stopped' | 'client_lost';
+
+export interface SimulationLastRun {
+  run_id: string;
+  reason: SimulationReason;
+  ended_at: number;
+}
+
+export interface SimulationState {
+  status: SimulationStatus;
+  run_id: string | null;
+  config: SimulationConfig | null;
+  duration_seconds: number;
+  /** Seconds left while running; the client counts down locally between polls. */
+  remaining_seconds: number | null;
+  reason: SimulationReason | null;
+  last_run: SimulationLastRun | null;
+}

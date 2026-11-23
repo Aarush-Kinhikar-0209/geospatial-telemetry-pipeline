@@ -93,7 +93,9 @@ services:
 
   # -------------------------------------------------------------------------
   # Data Generator: Python synthetic telemetry producer
-  # Streams fleet telemetry into the telemetry_raw topic on Redpanda.
+  # Idle until a simulation is started from the UI (through the API). Each
+  # simulation streams fleet telemetry into the telemetry_raw topic for its
+  # duration; vehicles, interval and chaos come from the request, not from here.
   # -------------------------------------------------------------------------
   generator:
     build:
@@ -102,15 +104,16 @@ services:
     container_name: generator
     restart: unless-stopped
     environment:
-      - VEHICLE_COUNT=${VEHICLE_COUNT:-200}
-      - CHAOS_PERCENTAGE=${CHAOS_PERCENTAGE:-5}
       - BOOTSTRAP_SERVERS=redpanda:29092
       - TOPIC=telemetry_raw
-      - MESSAGE_INTERVAL=${MESSAGE_INTERVAL:-0.2}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
     networks:
       - data-mesh
     depends_on:
       redpanda:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   # -------------------------------------------------------------------------
@@ -151,7 +154,7 @@ services:
         condition: service_healthy
 
   # -------------------------------------------------------------------------
-  # Serving API: FastAPI (SSE live feed, DLQ metrics, health)
+  # Serving API: FastAPI (SSE live feed, DLQ metrics, health, simulation control)
   # Swagger UI at http://localhost:8000/docs
   # -------------------------------------------------------------------------
   api:
@@ -171,6 +174,8 @@ services:
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?Set CLICKHOUSE_PASSWORD in .env (see .env.example)}
       - CLICKHOUSE_DB=fleet_analytics
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      - SIMULATION_DURATION_SECONDS=${SIMULATION_DURATION_SECONDS:-120}
+      - SIMULATION_HEARTBEAT_TIMEOUT_SECONDS=${SIMULATION_HEARTBEAT_TIMEOUT_SECONDS:-10}
     networks:
       - data-mesh
     healthcheck:

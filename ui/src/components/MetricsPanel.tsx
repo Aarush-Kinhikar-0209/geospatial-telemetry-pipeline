@@ -4,20 +4,26 @@ import type { StreamStatus } from '../hooks/useVehicleStream';
 import type { Sample } from '../hooks/useSampledHistory';
 import type { FleetStats } from '../lib/fleet';
 
+/** The stream's health while a simulation runs; otherwise where the simulation is. */
+export type FeedStatus = StreamStatus | 'idle' | 'stopping' | 'cleaning';
+
 interface MetricsPanelProps {
   stats: FleetStats;
   speedHistory: Sample[];
-  status: StreamStatus;
+  status: FeedStatus;
   connectMs: number | null;
   updatesPerSec: number;
   fps: number;
 }
 
-const STATUS_LABEL: Record<StreamStatus, string> = {
+const STATUS_LABEL: Record<FeedStatus, string> = {
   connecting: 'Connecting…',
   live: 'Live',
   stalled: 'Stalled',
   reconnecting: 'Reconnecting…',
+  idle: 'Idle',
+  stopping: 'Stopping…',
+  cleaning: 'Clearing data…',
 };
 
 function Stat({ label, value, testId }: { label: string; value: string; testId?: string }) {

@@ -11,7 +11,9 @@ export type ResponseParser<T> = (response: Response) => Promise<T>;
 export async function parseOk<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const body = await response.json().catch(() => null);
-    throw new Error(body?.detail ?? `HTTP ${response.status}`);
+    // FastAPI sends a string for most errors, but a list of problems for a 422.
+    const detail = typeof body?.detail === 'string' ? body.detail : null;
+    throw new Error(detail ?? `HTTP ${response.status}`);
   }
   return (await response.json()) as T;
 }

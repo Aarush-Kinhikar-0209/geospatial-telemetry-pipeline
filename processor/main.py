@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 
 import h3
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer, TopicPartition
+from aiokafka.admin import AIOKafkaAdminClient, RecordsToDelete
 from clickhouse_driver import Client as ClickHouseClient
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
 from redis.asyncio import Redis
@@ -64,6 +65,13 @@ METRICS_TTL_SECONDS: int = int(os.getenv('METRICS_TTL_SECONDS', '300'))
 H3_RESOLUTION: int = int(os.getenv('H3_RESOLUTION', '9'))
 METRICS_INTERVAL: float = float(os.getenv('METRICS_INTERVAL', '10'))
 STARTUP_RETRIES: int = int(os.getenv('STARTUP_RETRIES', '15'))
+CONTROL_POLL_SECONDS: float = float(os.getenv('CONTROL_POLL_SECONDS', '0.5'))
+
+# Control plane keys, shared with api/main.py and generator/main.py.
+SIMULATION_STATE_KEY = 'simulation:state'
+PROCESSOR_ACK_KEY = 'simulation:processor_ack'
+# Redis keys holding telemetry; everything else (simulation:*) is control state.
+VEHICLE_KEY_PATTERN = 'vehicle:*'
 
 logging.basicConfig(
     level=logging.INFO,
@@ -196,6 +204,10 @@ class TumblingWindows:
                 lowest[tp] = min(offset, lowest.get(tp, offset))
         return lowest
 
+    def clear(self) -> None:
+        """Discard every open window without persisting it."""
+        self.open.clear()
+
 
 def safe_commit_offsets(next_offsets: dict, open_min_offsets: dict) -> dict:
     """
@@ -217,6 +229,26 @@ def p95(samples: list[float]) -> float:
 
 def iso_z(ts: datetime) -> str:
     return ts.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def reset_requested(state_json: str | None, acked_run: str | None) -> str | None:
+    """
+    The simulation run whose telemetry must be cleared now, if any.
+
+    The API moves a run to `cleaning` once the generator has stopped; the
+    processor clears everything and records the run in its ack key. Reading the
+    ack from Redis (not memory) keeps this idempotent across processor restarts.
+    """
+    if not state_json:
+        return None
+    try:
+        state = json.loads(state_json)
+        status, run_id = state.get('status'), state.get('run_id')
+    except (ValueError, AttributeError):
+        return None
+    if status == 'cleaning' and run_id and run_id != acked_run:
+        return run_id
+    return None
 
 
 def vehicle_state(event: EnrichedEvent, processed_at: str) -> dict:
@@ -456,6 +488,103 @@ class StreamProcessor:
             len(self.windows.open),
         )
 
+    # -- clearing a finished simulation -------------------------------------
+
+    async def purge_kafka(self) -> dict[TopicPartition, int]:
+        """Delete every record currently in the input and DLQ topics."""
+        admin = AIOKafkaAdminClient(bootstrap_servers=BOOTSTRAP_SERVERS)
+        # A group-less consumer only reports offsets; it never joins the stream's group.
+        probe = AIOKafkaConsumer(
+            bootstrap_servers=BOOTSTRAP_SERVERS, group_id=None, enable_auto_commit=False
+        )
+        await admin.start()
+        try:
+            await probe.start()
+            try:
+                # A topic that was never written to does not exist yet, so skip it.
+                existing = set(await admin.list_topics())
+                wanted = [topic for topic in (INPUT_TOPIC, DLQ_TOPIC) if topic in existing]
+                described = await admin.describe_topics(wanted) if wanted else []
+                partitions = [
+                    TopicPartition(topic['topic'], partition['partition'])
+                    for topic in described
+                    for partition in topic['partitions']
+                ]
+                if not partitions:
+                    return {}
+                end_offsets = await probe.end_offsets(partitions)
+                deletions = {tp: RecordsToDelete(end) for tp, end in end_offsets.items() if end > 0}
+                if deletions:
+                    await admin.delete_records(deletions)
+                # Never acknowledge a clear that left records behind.
+                starts = await probe.beginning_offsets(partitions)
+                left = {tp: end_offsets[tp] - starts[tp] for tp in partitions}
+                if any(left.values()):
+                    raise RuntimeError(f'records remain after purge: {left}')
+                return end_offsets
+            finally:
+                await probe.stop()
+        finally:
+            await admin.close()
+
+    async def skip_to_end(self) -> None:
+        """Move the consumer (and its committed offsets) past the purged records."""
+        assignment = self.consumer.assignment()
+        if not assignment:
+            return  # not assigned yet; the purged log start is where it will begin
+        await self.consumer.seek_to_end(*assignment)
+        positions = {tp: await self.consumer.position(tp) for tp in assignment}
+        await self.consumer.commit(positions)
+
+    async def wipe_redis(self) -> int:
+        """Delete latest-state and per-second metric keys; leave control keys alone."""
+        deleted = 0
+        for pattern in (VEHICLE_KEY_PATTERN, f'{METRICS_KEY_PREFIX}*'):
+            keys = [key async for key in self.redis.scan_iter(match=pattern, count=1000)]
+            if keys:
+                deleted += await self.redis.unlink(*keys)
+        return deleted
+
+    async def reset_pipeline(self, run_id: str) -> None:
+        """
+        Remove every trace of a simulation: Kafka records, ClickHouse rows, Redis state.
+
+        Runs on the consumer loop, so no batch is in flight. Work buffered in
+        memory is dropped first; persisting it would put the run back.
+        """
+        started = time.monotonic()
+        self.windows.clear()
+        self.event_rows = []
+        self.next_offsets = {}
+        self.latencies_ms = []
+        self.processed = self.dlq_count = 0
+
+        await self.producer.flush()  # late DLQ writes must land before they are purged
+        purged = await self.purge_kafka()
+        await self.skip_to_end()
+        await self.ch_execute('TRUNCATE TABLE telemetry_events')
+        await self.ch_execute('TRUNCATE TABLE speed_rollups')
+        keys = await self.wipe_redis()
+        await self.redis.set(PROCESSOR_ACK_KEY, run_id)
+        logger.info(
+            'Cleared run %s in %.1fs: %d Kafka record(s), ClickHouse tables, %d Redis key(s)',
+            run_id,
+            time.monotonic() - started,
+            sum(purged.values()),
+            keys,
+        )
+
+    async def handle_control(self) -> None:
+        """Clear the pipeline when the API asks for it; retry on the next poll if it fails."""
+        try:
+            state_json, acked_run = await self.redis.mget(SIMULATION_STATE_KEY, PROCESSOR_ACK_KEY)
+            run_id = reset_requested(state_json, acked_run)
+            if run_id is not None:
+                await self.reset_pipeline(run_id)
+        except Exception:
+            logger.exception('Clearing the pipeline failed; will retry')
+            await asyncio.sleep(1)
+
     # -- main loop ----------------------------------------------------------
 
     def log_metrics(self, elapsed: float) -> None:
@@ -483,12 +612,16 @@ class StreamProcessor:
 
         try:
             await self.connect()
-            last_checkpoint = last_metrics = time.monotonic()
+            last_checkpoint = last_metrics = last_control = time.monotonic()
             while not self.stopping:
                 records = await self.consumer.getmany(timeout_ms=500, max_records=1000)
                 await self.process_batch(records)
 
                 now = time.monotonic()
+                if now - last_control >= CONTROL_POLL_SECONDS:
+                    await self.handle_control()
+                    last_control = time.monotonic()
+                    now = last_control
                 if (
                     now - last_checkpoint >= CHECKPOINT_INTERVAL
                     or len(self.event_rows) >= MAX_BUFFERED_EVENTS

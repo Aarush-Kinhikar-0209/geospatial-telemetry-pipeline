@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { endpoints, STALE_VEHICLE_MS, STREAM_FLUSH_MS } from '../config';
 import { FleetStore, parseVehicles, type TrackedVehicle } from '../lib/fleet';
 
@@ -23,20 +23,29 @@ const STALL_MS = 5000;
  *
  * Updates are buffered in a mutable store and pushed into React state at most
  * every STREAM_FLUSH_MS, so rendering cost does not scale with message rate.
+ *
+ * Changing `resetKey` (the simulation run) reconnects with an empty store, so
+ * vehicles from one run never linger into the next.
  */
-export function useVehicleStream(url: string = endpoints.stream): VehicleStream {
+export function useVehicleStream(
+  url: string = endpoints.stream,
+  resetKey: string | null = null,
+): VehicleStream {
   const [vehicles, setVehicles] = useState<TrackedVehicle[]>([]);
   const [status, setStatus] = useState<StreamStatus>('connecting');
   const [connectMs, setConnectMs] = useState<number | null>(null);
   const [updatesPerSec, setUpdatesPerSec] = useState(0);
+  // Page load to first data is measured once, not again after each reconnect.
+  const connectRecorded = useRef(false);
 
   useEffect(() => {
     const store = new FleetStore();
+    setVehicles((previous) => (previous.length > 0 ? [] : previous));
+    setStatus('connecting');
     let source: EventSource | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let dirty = false;
     let received = 0;
-    let firstSnapshot = true;
     let connected = false;
     let lastDataAt = 0;
 
@@ -48,8 +57,8 @@ export function useVehicleStream(url: string = endpoints.stream): VehicleStream 
         connected = true;
         lastDataAt = Date.now();
         setStatus('live');
-        if (firstSnapshot) {
-          firstSnapshot = false;
+        if (!connectRecorded.current) {
+          connectRecorded.current = true;
           performance.mark('fleet:snapshot');
           setConnectMs(Math.round(performance.now()));
         }
@@ -97,7 +106,7 @@ export function useVehicleStream(url: string = endpoints.stream): VehicleStream 
       clearInterval(prune);
       clearInterval(rate);
     };
-  }, [url]);
+  }, [url, resetKey]);
 
   return { vehicles, status, connectMs, updatesPerSec };
 }

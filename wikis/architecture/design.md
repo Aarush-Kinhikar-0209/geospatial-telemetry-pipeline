@@ -66,8 +66,8 @@ flowchart TD
 ## 🧩 Component Breakdown
 
 ### 1. Ingestion: Synthetic Telemetry Generator
-* **Role:** Simulates $N$ vehicles driving through geographic bounding boxes.
-* **Chaos Engineering:** Intentionally drops timestamps, malforms JSON, or corrupts schema types for 2-5% of events to test pipeline resilience.
+* **Role:** Simulates up to 200 vehicles driving on land inside Mumbai. It idles until a simulation is started (see [Simulation Lifecycle](#7-simulation-lifecycle)); the fleet size, message interval, and chaos rate come from that request.
+* **Chaos Engineering:** Intentionally drops timestamps, malforms JSON, or corrupts schema types for 0-5% of events (a whole-number percentage chosen per simulation) to test pipeline resilience.
 * **Protocol:** Produces messages to Redpanda via the Kafka wire protocol.
 
 ### 2. Message Broker: Redpanda
@@ -93,6 +93,21 @@ We use a polyglot persistence strategy to handle the differing read patterns of 
 
 ### 6. Presentation: Next.js + Deck.gl
 * **Deck.gl:** A WebGL-powered framework developed by Uber. It renders the moving fleet (`ScatterplotLayer`) on the GPU, far outperforming DOM-based mapping libraries (like Leaflet) for a live stream.
+
+### 7. Simulation Lifecycle
+A simulation is a timed run (2 minutes by default) whose data never outlives it. The API owns the lifecycle and stores it in Redis (`simulation:state`); the generator and processor follow it:
+
+```text
+idle --start--> running --(time up | stop | no heartbeat)--> stopping --> cleaning --> idle
+                   generator produces      generator flushes + acks   processor clears + acks
+```
+
+* **running:** the UI sends a heartbeat every 2 s. If none arrives within 10 s (tab closed, browser killed, connection lost) the API ends the run, so abandoned data is never left behind. A reload does not end a run.
+* **stopping:** the generator stops producing, flushes its Kafka producer, and writes `simulation:generator_ack`. If it does not answer in 10 s the API proceeds anyway.
+* **cleaning:** the processor, on its own consumer loop, drops its in-memory windows and buffered rows, deletes every record in `telemetry_raw` and `telemetry_dlq` (`DeleteRecords` up to each partition's end offset, then moves its consumer group there), truncates `telemetry_events` and `speed_rollups`, deletes `vehicle:*` and `metrics:pipeline:*` from Redis, and writes `simulation:processor_ack`. It refuses to acknowledge a purge that left records behind.
+* **idle:** the API removes `simulation:state`; the next run may start. Starting while a run is active is rejected (`409`).
+
+Every transition is level-triggered (each component acts on what it reads, not on an event it may have missed), and state lives in Redis, so a restart of any service resumes the lifecycle. The generator also enforces the run's deadline itself, so a lost API cannot leave it producing indefinitely.
 
 ---
 

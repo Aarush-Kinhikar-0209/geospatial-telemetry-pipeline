@@ -7,10 +7,17 @@ Bridges the frontend to the data stores without exposing them directly:
   * GET /api/v1/vehicles          current state snapshot
   * GET /api/v1/metrics/dlq       processed / dead-lettered message rates (Redis)
   * GET /api/v1/health            dependency health
+  * /api/v1/simulation/...        start, stop and observe the timed simulation
 
 Live updates come from the processor's Redis pub/sub channel. A single
 subscription is fanned out to every SSE client, so client count does not
 multiply load on Redis.
+
+A simulation is a timed run of the generator. The API owns its lifecycle
+(running -> stopping -> cleaning -> idle) and records it in Redis; the
+generator and processor follow that record. When the run ends, because time is
+up, it is stopped, or the browser stopped sending heartbeats, the processor
+clears Kafka, ClickHouse and Redis before the next run may start.
 
 Usage:
     uvicorn main:app --host 0.0.0.0 --port 8000
@@ -23,16 +30,17 @@ import json
 import logging
 import os
 import time
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 
 import clickhouse_connect
 from clickhouse_connect.driver.exceptions import OperationalError as ClickHouseOperationalError
-from fastapi import Depends, FastAPI, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from redis.asyncio import Redis
 from redis.asyncio.retry import Retry
 from redis.backoff import ExponentialBackoff
@@ -68,6 +76,27 @@ CORS_ORIGINS: list[str] = [
 SSE_HEARTBEAT_SECONDS: float = float(os.getenv('SSE_HEARTBEAT_SECONDS', '15'))
 SSE_QUEUE_SIZE: int = int(os.getenv('SSE_QUEUE_SIZE', '256'))
 SSE_COALESCE_SECONDS: float = float(os.getenv('SSE_COALESCE_MS', '50')) / 1000
+
+# Simulation limits: the contract the UI form and the generator rely on.
+MAX_VEHICLES = 200
+MIN_INTERVAL_SECONDS = 0.1
+MAX_INTERVAL_SECONDS = 2.0
+MAX_CHAOS_PERCENT = 5
+SIMULATION_DURATION_SECONDS: int = int(os.getenv('SIMULATION_DURATION_SECONDS', '120'))
+# A running simulation with no heartbeat for this long is treated as an abandoned page.
+SIMULATION_HEARTBEAT_TIMEOUT_SECONDS: float = float(
+    os.getenv('SIMULATION_HEARTBEAT_TIMEOUT_SECONDS', '10')
+)
+# How long to wait for the generator to confirm it stopped before clearing anyway.
+SIMULATION_ACK_TIMEOUT_SECONDS: float = float(os.getenv('SIMULATION_ACK_TIMEOUT_SECONDS', '10'))
+SIMULATION_POLL_SECONDS: float = float(os.getenv('SIMULATION_POLL_SECONDS', '0.5'))
+
+# Control plane keys, shared with generator/main.py and processor/main.py.
+SIMULATION_STATE_KEY = 'simulation:state'
+SIMULATION_HEARTBEAT_KEY = 'simulation:heartbeat'
+SIMULATION_GENERATOR_ACK_KEY = 'simulation:generator_ack'
+SIMULATION_PROCESSOR_ACK_KEY = 'simulation:processor_ack'
+SIMULATION_LAST_KEY = 'simulation:last'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] api: %(message)s')
 logger = logging.getLogger('api')
@@ -109,6 +138,49 @@ class Health(BaseModel):
     clickhouse: bool
     sse_clients: int
     live_feed: bool = Field(description='Whether the Redis pub/sub subscription is active')
+
+
+class SimulationConfig(BaseModel):
+    """What the user asks a simulation to produce."""
+
+    model_config = ConfigDict(strict=True, extra='forbid')
+
+    vehicles: int = Field(ge=1, le=MAX_VEHICLES, description='Fleet size')
+    interval_seconds: float = Field(
+        ge=MIN_INTERVAL_SECONDS,
+        le=MAX_INTERVAL_SECONDS,
+        description='Seconds between messages from one vehicle',
+    )
+    chaos_percent: int = Field(
+        ge=0, le=MAX_CHAOS_PERCENT, description='Share of messages deliberately corrupted'
+    )
+
+
+SimulationReason = Literal['completed', 'stopped', 'client_lost']
+
+
+class SimulationLastRun(BaseModel):
+    run_id: str
+    reason: SimulationReason
+    ended_at: float = Field(description='Unix time the run was fully cleared')
+
+
+class SimulationState(BaseModel):
+    status: Literal['idle', 'running', 'stopping', 'cleaning'] = Field(
+        description='idle -> running -> stopping (generator) -> cleaning (data) -> idle'
+    )
+    run_id: str | None = None
+    config: SimulationConfig | None = None
+    duration_seconds: int
+    remaining_seconds: float | None = Field(
+        default=None, description='Seconds left while running; clients count down locally'
+    )
+    reason: SimulationReason | None = Field(
+        default=None, description='Why a run is stopping or being cleared'
+    )
+    last_run: SimulationLastRun | None = Field(
+        default=None, description='The most recent finished run (only while idle)'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +364,176 @@ async def vehicle_events(
 
 
 # ---------------------------------------------------------------------------
+# Simulation lifecycle
+# ---------------------------------------------------------------------------
+class SimulationBusy(Exception):
+    def __init__(self, status: str) -> None:
+        super().__init__(status)
+        self.status = status
+
+
+class SimulationController:
+    """
+    Owns the simulation lifecycle; its state lives in Redis so it survives an
+    API restart and is what the generator and processor follow.
+
+        running   the generator produces; ends at the deadline, on stop, or when
+                  the browser's heartbeat lapses
+        stopping  the generator is told to stop; wait for its ack (or a timeout)
+        cleaning  the processor clears Kafka, ClickHouse and Redis; wait for its ack
+        (absent)  idle: a new run may start
+
+    Every step is driven by `reconcile`, which reads the state and moves it one
+    step, so a missed poll or a restart only delays the next transition.
+    Assumes a single API instance (the SSE fan-out already does).
+    """
+
+    def __init__(
+        self,
+        redis: Redis,
+        *,
+        duration_seconds: int = SIMULATION_DURATION_SECONDS,
+        heartbeat_timeout_seconds: float = SIMULATION_HEARTBEAT_TIMEOUT_SECONDS,
+        ack_timeout_seconds: float = SIMULATION_ACK_TIMEOUT_SECONDS,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self.redis = redis
+        self.duration_seconds = duration_seconds
+        self.heartbeat_timeout_seconds = heartbeat_timeout_seconds
+        self.ack_timeout_seconds = ack_timeout_seconds
+        self.clock = clock
+        self.lock = asyncio.Lock()
+
+    async def load(self) -> dict | None:
+        raw = await self.redis.get(SIMULATION_STATE_KEY)
+        return json.loads(raw) if raw else None
+
+    async def save(self, state: dict) -> None:
+        await self.redis.set(SIMULATION_STATE_KEY, json.dumps(state))
+
+    async def beat(self) -> None:
+        await self.redis.set(
+            SIMULATION_HEARTBEAT_KEY, '1', px=max(1, int(self.heartbeat_timeout_seconds * 1000))
+        )
+
+    async def start(self, config: SimulationConfig) -> dict:
+        async with self.lock:
+            current = await self.load()
+            if current is not None:
+                raise SimulationBusy(current['status'])
+            now = self.clock()
+            state = {
+                'run_id': uuid.uuid4().hex[:12],
+                'status': 'running',
+                'config': config.model_dump(),
+                'started_at': now,
+                'ends_at': now + self.duration_seconds,
+                'duration_seconds': self.duration_seconds,
+                'reason': None,
+            }
+            # The first heartbeat is part of starting, so the run is not abandoned at birth.
+            await self.beat()
+            await self.save(state)
+            logger.info('Simulation %s started: %s', state['run_id'], state['config'])
+            return state
+
+    async def heartbeat(self) -> None:
+        """The page is open: keep the running simulation alive."""
+        state = await self.load()
+        if state is not None and state['status'] == 'running':
+            await self.beat()
+
+    async def stop(self, reason: SimulationReason = 'stopped') -> dict | None:
+        """Begin ending a running simulation; any other state is left as is."""
+        async with self.lock:
+            state = await self.load()
+            if state is not None and state['status'] == 'running':
+                state.update(status='stopping', reason=reason, stopped_at=self.clock())
+                await self.save(state)
+                logger.info('Simulation %s stopping (%s)', state['run_id'], reason)
+            return state
+
+    async def reconcile(self) -> None:
+        """Move the simulation one step along its lifecycle if it is due."""
+        state = await self.load()
+        if state is None:
+            return
+        status = state['status']
+        if status == 'running':
+            if self.clock() >= state['ends_at']:
+                await self.stop('completed')
+            elif not await self.redis.exists(SIMULATION_HEARTBEAT_KEY):
+                await self.stop('client_lost')
+        elif status == 'stopping':
+            await self.advance_after_generator(state)
+        elif status == 'cleaning':
+            await self.finish_after_processor(state)
+
+    async def advance_after_generator(self, state: dict) -> None:
+        async with self.lock:
+            acked = await self.redis.get(SIMULATION_GENERATOR_ACK_KEY) == state['run_id']
+            waited = self.clock() - state.get('stopped_at', 0)
+            if acked or waited >= self.ack_timeout_seconds:
+                if not acked:
+                    logger.warning(
+                        'Generator did not confirm stopping run %s; clearing anyway',
+                        state['run_id'],
+                    )
+                current = await self.load()
+                if current is not None and current['run_id'] == state['run_id']:
+                    current.update(status='cleaning', cleaning_at=self.clock())
+                    await self.save(current)
+                    logger.info('Simulation %s cleaning', state['run_id'])
+
+    async def finish_after_processor(self, state: dict) -> None:
+        async with self.lock:
+            if await self.redis.get(SIMULATION_PROCESSOR_ACK_KEY) != state['run_id']:
+                return
+            last = SimulationLastRun(
+                run_id=state['run_id'],
+                reason=state.get('reason') or 'stopped',
+                ended_at=self.clock(),
+            )
+            async with self.redis.pipeline(transaction=True) as pipe:
+                pipe.set(SIMULATION_LAST_KEY, last.model_dump_json())
+                pipe.delete(SIMULATION_STATE_KEY)
+                await pipe.execute()
+            logger.info('Simulation %s cleared (%s)', state['run_id'], state['reason'])
+
+    async def snapshot(self) -> SimulationState:
+        state = await self.load()
+        if state is None:
+            raw = await self.redis.get(SIMULATION_LAST_KEY)
+            return SimulationState(
+                status='idle',
+                duration_seconds=self.duration_seconds,
+                last_run=SimulationLastRun.model_validate_json(raw) if raw else None,
+            )
+        remaining = None
+        if state['status'] == 'running':
+            remaining = max(0.0, state['ends_at'] - self.clock())
+        return SimulationState(
+            status=state['status'],
+            run_id=state['run_id'],
+            config=SimulationConfig.model_validate(state['config']),
+            duration_seconds=state['duration_seconds'],
+            remaining_seconds=remaining,
+            reason=state.get('reason'),
+        )
+
+    async def run(self, poll_seconds: float) -> None:
+        """Drive the lifecycle until cancelled; a Redis outage only delays it."""
+        while True:
+            try:
+                await self.reconcile()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning('Simulation reconcile failed: %s', exc)
+            await asyncio.sleep(poll_seconds)
+
+
+# ---------------------------------------------------------------------------
 # ClickHouse (health check; the processor owns the analytical writes)
 # ---------------------------------------------------------------------------
 async def default_clickhouse_factory():
@@ -326,6 +568,8 @@ def default_redis_factory() -> Redis:
 def create_app(
     redis_factory: Callable[[], Redis] = default_redis_factory,
     clickhouse_factory: Callable[[], Awaitable[Any]] = default_clickhouse_factory,
+    simulation_clock: Callable[[], float] = time.time,
+    simulation_poll_seconds: float = SIMULATION_POLL_SECONDS,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -333,13 +577,19 @@ def create_app(
         app.state.clickhouse = None
         app.state.clickhouse_lock = asyncio.Lock()
         app.state.broadcaster = VehicleBroadcaster(app.state.redis, UPDATES_CHANNEL)
-        feed = asyncio.create_task(app.state.broadcaster.run())
+        app.state.simulation = SimulationController(app.state.redis, clock=simulation_clock)
+        background = [
+            asyncio.create_task(app.state.broadcaster.run()),
+            asyncio.create_task(app.state.simulation.run(simulation_poll_seconds)),
+        ]
         try:
             yield
         finally:
-            feed.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await feed
+            for task in background:
+                task.cancel()
+            for task in background:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
             await app.state.redis.aclose()
             if app.state.clickhouse is not None:
                 with contextlib.suppress(Exception):
@@ -356,7 +606,7 @@ def create_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origins=CORS_ORIGINS,
-        allow_methods=['GET'],
+        allow_methods=['GET', 'POST'],
         allow_headers=['*'],
     )
 
@@ -388,7 +638,52 @@ def create_app(
                         raise ServiceUnavailable('clickhouse', str(exc)) from exc
         return state.clickhouse
 
+    def get_simulation(request: Request) -> SimulationController:
+        return request.app.state.simulation
+
     RedisDep = Annotated[Redis, Depends(get_redis)]
+    SimulationDep = Annotated[SimulationController, Depends(get_simulation)]
+
+    @app.get('/api/v1/simulation', response_model=SimulationState, tags=['simulation'])
+    async def simulation_state(simulation: SimulationDep) -> SimulationState:
+        """Where the simulation is in its lifecycle, and how long it has left."""
+        return await simulation.snapshot()
+
+    @app.post(
+        '/api/v1/simulation/start',
+        response_model=SimulationState,
+        tags=['simulation'],
+        responses={409: {'description': 'A simulation is already in progress'}},
+    )
+    async def simulation_start(
+        config: SimulationConfig, simulation: SimulationDep
+    ) -> SimulationState:
+        """
+        Start a timed simulation. When it ends (time up, stopped, or the page went
+        away) every trace of it is deleted from Kafka, ClickHouse and Redis.
+        """
+        try:
+            await simulation.start(config)
+        except SimulationBusy as exc:
+            raise HTTPException(
+                status_code=409, detail=f'A simulation is already {exc.status}'
+            ) from exc
+        return await simulation.snapshot()
+
+    @app.post('/api/v1/simulation/stop', response_model=SimulationState, tags=['simulation'])
+    async def simulation_stop(simulation: SimulationDep) -> SimulationState:
+        """End the running simulation now; its data is then cleared like any other run."""
+        await simulation.stop('stopped')
+        return await simulation.snapshot()
+
+    @app.post('/api/v1/simulation/heartbeat', response_model=SimulationState, tags=['simulation'])
+    async def simulation_heartbeat(simulation: SimulationDep) -> SimulationState:
+        """
+        Tell the API the page is still open. A running simulation whose heartbeat
+        lapses (see SIMULATION_HEARTBEAT_TIMEOUT_SECONDS) is stopped and cleared.
+        """
+        await simulation.heartbeat()
+        return await simulation.snapshot()
 
     @app.get('/api/v1/vehicles', response_model=list[VehicleState], tags=['live'])
     async def vehicles(redis: RedisDep) -> list[VehicleState]:

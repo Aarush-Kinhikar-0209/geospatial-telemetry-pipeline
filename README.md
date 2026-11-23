@@ -23,7 +23,7 @@ This project simulates a live fleet of delivery vehicles, processes their teleme
 
 ```mermaid
 graph TD
-    A["Telemetry Generator<br/>(Simulates 200+ Vehicles)"] -->|JSON over Kafka protocol| B["Kafka / Redpanda Broker"]
+    A["Telemetry Generator<br/>(Simulates up to 200 Vehicles)"] -->|JSON over Kafka protocol| B["Kafka / Redpanda Broker"]
     
     B --> C["Stream Processor<br/>(Python asyncio + aiokafka)"]
     
@@ -41,9 +41,9 @@ graph TD
 
 *   `docker-compose.yml`: Orchestrates every service (lives at the repository root).
 *   `/infrastructure`: Initialization scripts for ClickHouse.
-*   `/generator`: Python script to simulate fleet movement and inject chaotic/malformed data.
-*   `/processor`: Stream processing application handling H3 indexing, windowing, and DLQ routing.
-*   `/api`: FastAPI application serving SSE streams and aggregate REST endpoints.
+*   `/generator`: Python service that simulates fleet movement and injects chaotic/malformed data while a simulation runs.
+*   `/processor`: Stream processing application handling H3 indexing, windowing, DLQ routing, and clearing a finished simulation.
+*   `/api`: FastAPI application serving SSE streams, REST endpoints, and the simulation lifecycle.
 *   `/ui`: React + Vite frontend with deck.gl (WebGL) layers over a MapLibre base map.
 *   `/tests`: Unit and API contract tests for the generator, processor and API (`pytest`). UI unit tests live in `ui/src` (`vitest`).
 *   `/docs`: Reserved for longer write-ups (currently empty).
@@ -85,7 +85,7 @@ Ensure you have [Docker](https://docs.docker.com/get-docker/) and Docker Compose
    Step-by-step checks are in [`wikis/test_guide_docker_compose.md`](wikis/test_guide_docker_compose.md).
 
 3. **View the Dashboard:**
-   Navigate to `http://localhost:3000` to see the live map, telemetry metrics, and the DLQ monitor in action. The API's Swagger UI is at `http://localhost:8000/docs`.
+   Navigate to `http://localhost:3000`. The stack starts idle; choose a fleet in the **Simulation** panel and press **Start simulation** to see the live map, telemetry metrics, and the DLQ monitor in action (see [Simulations](#-simulations)). The API's Swagger UI is at `http://localhost:8000/docs`.
 
 4. **(Optional) Run the UI with hot reload:**
    ```bash
@@ -93,6 +93,34 @@ Ensure you have [Docker](https://docs.docker.com/get-docker/) and Docker Compose
    npm ci
    npm run dev   # http://localhost:5173, proxies /api to http://localhost:8000
    ```
+
+## ▶️ Simulations
+
+Nothing is generated until you start a simulation. The **Simulation** panel takes:
+
+| Setting | Range | Default |
+|---|---|---|
+| Vehicles | 1 – 200 (whole number) | 100 |
+| Interval (s) | 0.1 – 2.0 | 2.0 |
+| Chaos (%) | 0 – 5 (whole number) | 5 |
+
+**Start simulation** runs the fleet for 2 minutes (`SIMULATION_DURATION_SECONDS`) with a countdown. Out-of-range input is flagged in the form and rejected by the API (`422`). Only one simulation runs at a time (`409` otherwise). **Stop & clear data** ends a run early.
+
+When a run ends, **every trace of it is deleted** before a new one can start:
+
+| Store | What is cleared |
+|---|---|
+| Kafka (Redpanda) | all records in `telemetry_raw` and `telemetry_dlq` (the consumer group moves to the end) |
+| ClickHouse | `telemetry_events` and `speed_rollups` are truncated |
+| Redis | `vehicle:*` latest states and the per-second `metrics:pipeline:*` counters |
+
+A run ends, and is cleared, when:
+
+* the timer reaches zero,
+* you press **Stop & clear data**, or
+* **the page goes away.** While a run is going the page sends a heartbeat every 2 s; if none arrives for `SIMULATION_HEARTBEAT_TIMEOUT_SECONDS` (10 s) because the tab was closed, the browser crashed, or the connection dropped, the API ends the run and clears the data. A page reload does not end it: the countdown picks up where it was.
+
+How it fits together: the API owns the lifecycle (`running → stopping → cleaning → idle`) and records it in Redis (`simulation:state`). The generator idles until a run appears, produces for it, and acknowledges once it has stopped and flushed. The processor then discards its in-memory windows, clears the three stores, and acknowledges. Because the processor does the clearing on its own consumer loop, nothing it buffered can be written back after the wipe. Control state lives in Redis, so an API, generator, or processor restart resumes the lifecycle instead of losing it. Endpoints: `GET /api/v1/simulation`, `POST /api/v1/simulation/{start,stop,heartbeat}`.
 
 ## 🗺️ Base Map & API Keys
 
@@ -116,13 +144,14 @@ If the style fails to load, the UI shows a red "Base map" banner; vehicle marker
 
 ## 🧪 Chaos Engineering & DLQ
 
-The generator marks an exact share of payloads as invalid. The default in `.env` is `CHAOS_PERCENTAGE=5`, which the DLQ monitor reports as about 5% and leaves in the green **Nominal** state. Bad payloads are quarantined without stopping the consumer.
+The generator marks an exact share of payloads as invalid; you choose it (0-5%) when starting a simulation. At 5% the DLQ monitor reports about 5% and stays in the green **Nominal** state. Bad payloads are quarantined without stopping the consumer.
 
-The monitor turns red and flashes **DLQ spike** when the dead-lettered share over the last 3 seconds reaches `VITE_DLQ_ALERT_RATIO` (default `0.1`, baked into the UI image at build time). Force that without editing `.env`:
+The monitor turns red and flashes **DLQ spike** when the dead-lettered share over the last 3 seconds reaches `VITE_DLQ_ALERT_RATIO` (default `0.1`, baked into the UI image at build time). The simulation form stops at 5%, so force a spike with a standalone generator that is configured from the environment instead:
 ```bash
-CHAOS_PERCENTAGE=50 docker compose up -d generator   # monitor turns red within ~2 s
-docker compose up -d generator                       # back to the .env value
+docker compose run --rm -e CHAOS_PERCENTAGE=50 -e VEHICLE_COUNT=50 -e MESSAGE_INTERVAL=0.5 \
+  generator python main.py --standalone   # monitor turns red within ~2 s; Ctrl-C to stop
 ```
+That traffic is not part of a simulation, so it is cleared by the next simulation's cleanup (or `docker compose down -v`).
 
 ## 🛠️ Built With
 

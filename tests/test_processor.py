@@ -81,9 +81,8 @@ def test_valid_record_is_enriched(proc):
 def test_generator_contract(proc, gen):
     """Clean generator output is valid downstream; every chaos payload is DLQ'd."""
     for pct, expect_valid in ((0, True), (100, False)):
-        gen.CHAOS_PERCENTAGE = pct
         g = gen.TelemetryGenerator(stdout=True)
-        g.initialize_vehicles()
+        g.configure(gen.RunConfig(vehicles=200, interval=0.2, chaos_percent=pct))
         vehicles = list(g.vehicles.items())
         for i in range(1000):
             vid, state = vehicles[i % len(vehicles)]
@@ -149,3 +148,56 @@ def test_commit_never_passes_an_open_window(proc):
 def test_p95(proc):
     assert proc.p95([]) == 0
     assert proc.p95([float(i) for i in range(1, 101)]) == 96
+
+
+# ---------------------------------------------------------------------------
+# Clearing a finished simulation
+# ---------------------------------------------------------------------------
+def sim_state(status: str, run_id: str = 'r1') -> str:
+    return json.dumps({'status': status, 'run_id': run_id})
+
+
+def test_reset_is_requested_only_while_cleaning_an_unacknowledged_run(proc):
+    assert proc.reset_requested(sim_state('cleaning'), None) == 'r1'
+    assert proc.reset_requested(sim_state('cleaning'), 'older-run') == 'r1'
+    assert proc.reset_requested(sim_state('cleaning'), 'r1') is None  # already done
+    for status in ('running', 'stopping'):
+        assert proc.reset_requested(sim_state(status), None) is None
+    assert proc.reset_requested(None, None) is None
+
+
+@pytest.mark.parametrize('raw', ['', '{broken', 'null', '[]', '{"status":"cleaning"}'])
+def test_reset_ignores_unreadable_state(proc, raw):
+    assert proc.reset_requested(raw, None) is None
+
+
+def test_clearing_windows_discards_them_without_persisting(proc):
+    windows = proc.TumblingWindows(size=10, lateness=5)
+    windows.add(make_event(proc, '2026-11-17T18:45:01Z', 10), TP, offset=7)
+    windows.clear()
+    assert windows.open == {}
+    assert windows.min_open_offsets() == {}
+
+
+def test_reset_wipes_telemetry_from_redis_but_keeps_control_state(proc):
+    import asyncio
+
+    import fakeredis
+
+    async def scenario():
+        redis = fakeredis.FakeAsyncRedis(decode_responses=True)
+        for key in ('vehicle:v-001', 'vehicle:v-002', 'metrics:pipeline:1700000000'):
+            await redis.hset(key, mapping={'a': '1'})
+        for key in ('simulation:state', 'simulation:heartbeat', 'simulation:generator_ack'):
+            await redis.set(key, 'keep')
+
+        processor = proc.StreamProcessor()
+        processor.redis = redis
+        deleted = await processor.wipe_redis()
+
+        remaining = sorted([key async for key in redis.scan_iter(match='*')])
+        return deleted, remaining
+
+    deleted, remaining = asyncio.run(scenario())
+    assert deleted == 3
+    assert remaining == ['simulation:generator_ack', 'simulation:heartbeat', 'simulation:state']

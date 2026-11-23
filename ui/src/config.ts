@@ -27,4 +27,8 @@ export const endpoints = {
   stream: `${API_BASE}/api/v1/stream/vehicles`,
   dlq: `${API_BASE}/api/v1/metrics/dlq?window=3&history=60`,
   health: `${API_BASE}/api/v1/health`,
+  simulation: `${API_BASE}/api/v1/simulation`,
+  simulationStart: `${API_BASE}/api/v1/simulation/start`,
+  simulationStop: `${API_BASE}/api/v1/simulation/stop`,
+  simulationHeartbeat: `${API_BASE}/api/v1/simulation/heartbeat`,
 };
