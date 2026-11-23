@@ -10,7 +10,7 @@
 
 An end-to-end, real-time data engineering pipeline demonstrating distributed stream processing, stateful windowing, and resilient architecture patterns (Dead Letter Queues). 
 
-This project simulates a live fleet of delivery vehicles, processes their telemetry at high throughput, and serves sub-second spatial aggregations to a hardware-accelerated frontend.
+This project simulates a live fleet of delivery vehicles, processes their telemetry at high throughput, and serves live positions plus fast H3 zone aggregates to a hardware-accelerated frontend.
 
 ## 🌟 Key Engineering Features
 
@@ -28,7 +28,7 @@ graph TD
     B --> C["Stream Processor<br/>(Python asyncio + aiokafka)"]
     
     C -->|Malformed Pings| D["Dead Letter Queue (DLQ)"]
-    C -->|Aggregates & Geohashes| E["ClickHouse<br/>(OLAP Storage)"]
+    C -->|Window aggregates & H3 cells| E["ClickHouse<br/>(OLAP Storage)"]
     C -->|Latest Coordinates| F["Redis<br/>(In-Memory Cache)"]
     
     E --> G["FastAPI Backend"]
@@ -42,12 +42,12 @@ graph TD
 *   `docker-compose.yml`: Orchestrates every service (lives at the repository root).
 *   `/infrastructure`: Initialization scripts for ClickHouse.
 *   `/generator`: Python script to simulate fleet movement and inject chaotic/malformed data.
-*   `/processor`: Stream processing application handling geohashing, windowing, and DLQ routing.
+*   `/processor`: Stream processing application handling H3 indexing, windowing, and DLQ routing.
 *   `/api`: FastAPI application serving SSE streams and aggregate REST endpoints.
 *   `/ui`: React + Vite frontend with deck.gl (WebGL) layers over a MapLibre base map.
 *   `/tests`: Unit and API contract tests for the generator, processor and API (`pytest`). UI unit tests live in `ui/src` (`vitest`).
-*   `/docs`: Project documentation.
-*   `/wikis`: Architecture notes and phase-by-phase acceptance criteria.
+*   `/docs`: Reserved for longer write-ups (currently empty).
+*   `/wikis`: Architecture notes, phase briefs, and the Docker Compose test guide.
 
 ## 🧑‍💻 Local Development
 
@@ -71,16 +71,18 @@ Ensure you have [Docker](https://docs.docker.com/get-docker/) and Docker Compose
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/realtime-fleet-analytics.git
-   cd realtime-fleet-analytics
+   git clone https://github.com/Aarush-Kinhikar-0209/geospatial-telemetry-pipeline.git
+   cd geospatial-telemetry-pipeline
    ```
 
 2. **Spin up the data platform:**
    ```bash
-   cp .env.example .env   # then edit credentials / tuning knobs
-   docker compose up -d
+   cp .env.example .env   # set CLICKHOUSE_PASSWORD (and any tuning knobs)
+   docker compose up -d --build
    ```
-   *This single command boots the broker, databases, stream processor, data generator, backend API, and the UI.*
+   *This builds and starts the broker, databases, stream processor, data generator, backend API, and the UI. Keep `.env` in LF line endings; Compose does not strip a trailing `\r` from values.*
+
+   Step-by-step checks are in [`wikis/test_guide_docker_compose.md`](wikis/test_guide_docker_compose.md).
 
 3. **View the Dashboard:**
    Navigate to `http://localhost:3000` to see the live map, telemetry metrics, and the DLQ monitor in action. The API's Swagger UI is at `http://localhost:8000/docs`.
@@ -114,16 +116,13 @@ If the style fails to load, the UI shows a red "Base map" banner; vehicles and z
 
 ## 🧪 Chaos Engineering & DLQ
 
-To see the Dead Letter Queue in action, adjust the chaos parameter in your `.env` (consumed by the `generator` service in `docker-compose.yml`):
-```bash
-CHAOS_PERCENTAGE=5  # Forces 5% of records to violate schema
-```
-Watch the "DLQ Monitor" on the frontend light up as bad payloads are safely quarantined without crashing the consumer. To force a spike without editing `.env`:
+The generator marks an exact share of payloads as invalid. The default in `.env` is `CHAOS_PERCENTAGE=5`, which the DLQ monitor reports as about 5% and leaves in the green **Nominal** state. Bad payloads are quarantined without stopping the consumer.
+
+The monitor turns red and flashes **DLQ spike** when the dead-lettered share over the last 3 seconds reaches `VITE_DLQ_ALERT_RATIO` (default `0.1`, baked into the UI image at build time). Force that without editing `.env`:
 ```bash
 CHAOS_PERCENTAGE=50 docker compose up -d generator   # monitor turns red within ~2 s
 docker compose up -d generator                       # back to the .env value
 ```
-The monitor alerts when the dead-lettered share over the last 3 seconds reaches `VITE_DLQ_ALERT_RATIO` (default `0.1`).
 
 ## 🛠️ Built With
 
