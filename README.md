@@ -25,21 +25,9 @@ The **View** button in the Fleet panel opens every vehicle's latest speed, sorte
 
 ## 🏗️ Architecture
 
-```mermaid
-graph TD
-    A["Telemetry Generator<br/>(Simulates up to 200 Vehicles)"] -->|JSON over Kafka protocol| B["Kafka / Redpanda Broker"]
+![Architecture: the generator publishes to Redpanda, the processor routes to the DLQ, ClickHouse and Redis, and the FastAPI backend serves the React UI](wikis/images/architecture.png)
 
-    B --> C["Stream Processor<br/>(Python asyncio + aiokafka)"]
-
-    C -->|Malformed Pings| D["Dead Letter Queue (DLQ)"]
-    C -->|Windowed speed history| E["ClickHouse<br/>(OLAP Storage)"]
-    C -->|Latest Coordinates| F["Redis<br/>(In-Memory Cache)"]
-
-    E --> G["FastAPI Backend"]
-    F --> G
-
-    G -->|Server-Sent Events + REST| H["React + deck.gl UI<br/>(Vite, MapLibre)"]
-```
+The image is a PNG export of the Mermaid source in [`wikis/images/architecture.mmd`](wikis/images/architecture.mmd). After editing the source, re-export the PNG with any Mermaid renderer, such as the Mermaid Live Editor.
 
 ## 📂 Repository Structure
 

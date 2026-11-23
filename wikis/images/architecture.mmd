@@ -1,0 +1,13 @@
+graph TD
+    A["Telemetry Generator<br/>(Simulates up to 200 Vehicles)"] -->|JSON over Kafka protocol| B["Kafka / Redpanda Broker"]
+
+    B --> C["Stream Processor<br/>(Python asyncio + aiokafka)"]
+
+    C -->|Malformed Pings| D["Dead Letter Queue (DLQ)"]
+    C -->|Windowed speed history| E["ClickHouse<br/>(OLAP Storage)"]
+    C -->|Latest Coordinates| F["Redis<br/>(In-Memory Cache)"]
+
+    E --> G["FastAPI Backend"]
+    F --> G
+
+    G -->|Server-Sent Events + REST| H["React + deck.gl UI<br/>(Vite, MapLibre)"]
