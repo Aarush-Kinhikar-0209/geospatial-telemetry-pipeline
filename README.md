@@ -9,6 +9,20 @@ An end-to-end streaming data pipeline. It simulates a fleet of delivery vehicles
 *   **Two stores:** Redis holds each vehicle's latest position for fast lookups; ClickHouse holds the history and the speed rollups.
 *   **Spatial indexing:** each position is stored with its H3 cell (resolution 9).
 
+## 📸 Screenshots
+
+The dashboard before a run:
+
+![Dashboard idle: the Simulation panel shows the default settings and the map is empty](wikis/images/dashboard-idle.png)
+
+A run in progress with the default settings (100 vehicles, 2.0 s interval, 5% chaos). The countdown, live fleet stats, and the DLQ monitor are on screen:
+
+![Dashboard running: vehicles on the Mumbai map with the countdown and the DLQ monitor](wikis/images/dashboard-running.png)
+
+The **View** button in the Fleet panel opens every vehicle's latest speed, sorted by speed:
+
+![Vehicle speeds pop-up listing each vehicle's speed in km/h](wikis/images/speed-per-vehicle.png)
+
 ## 🏗️ Architecture
 
 ```mermaid
