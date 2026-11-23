@@ -89,6 +89,30 @@ export function fleetStats(vehicles: readonly VehicleState[]): FleetStats {
   };
 }
 
+export type SortKey = 'id' | 'speed';
+export type SortDirection = 'asc' | 'desc';
+
+const idCollator = new Intl.Collator('en', { numeric: true });
+
+/**
+ * A sorted copy of `vehicles`. IDs compare numerically ("v-2" before "v-10") and
+ * break speed ties, so equal speeds never swap places between refreshes.
+ */
+export function sortVehicles<T extends VehicleState>(
+  vehicles: readonly T[],
+  key: SortKey,
+  direction: SortDirection,
+): T[] {
+  const sign = direction === 'asc' ? 1 : -1;
+  return [...vehicles].sort((a, b) => {
+    if (key === 'speed' && a.speed_kmh !== b.speed_kmh) {
+      return sign * (a.speed_kmh - b.speed_kmh);
+    }
+    const byId = idCollator.compare(a.vehicle_id, b.vehicle_id);
+    return key === 'id' ? sign * byId : byId;
+  });
+}
+
 function lerp(a: Rgb, b: Rgb, t: number): Rgb {
   return [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * t)) as Rgb;
 }

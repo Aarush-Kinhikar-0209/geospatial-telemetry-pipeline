@@ -200,6 +200,7 @@ Open http://localhost:3000 (nginx serves the bundle and proxies `/api`, includin
 | Validation | Vehicles outside 1-200, interval outside 0.1-2.0, chaos outside 0-5 or not a whole number shows an inline error and disables **Start simulation** |
 | Start | The form is replaced by a `M:SS` countdown, a progress bar, and a summary such as "20 vehicles · every 0.5 s · 2% chaos" |
 | Data binding | Fleet panel shows `Live` and as many active vehicles as you chose; markers glide between updates |
+| Vehicle speeds | **View** (Fleet panel) is disabled while idle; during a run it opens a pop-up listing every vehicle's latest speed. Default order is speed descending; click the **Vehicle ID** or **Speed** header to sort, click again to reverse. Esc, the ✕ button, or a click outside closes it. The list refreshes once a second |
 | Time to live data | Footer "first data in … ms" < 1000 ms |
 | FPS | Fleet panel FPS ~60 (at the display's refresh rate) |
 | DLQ monitor | `Nominal` at ~5%; Redis / ClickHouse / Feed dots green |

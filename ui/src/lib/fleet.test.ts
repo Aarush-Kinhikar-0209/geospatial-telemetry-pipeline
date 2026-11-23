@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { VehicleState } from '../types';
-import { FleetStore, fleetStats, parseVehicles, speedColor } from './fleet';
+import { FleetStore, fleetStats, parseVehicles, sortVehicles, speedColor } from './fleet';
 
 function vehicle(id: string, overrides: Partial<VehicleState> = {}): VehicleState {
   return {
@@ -76,6 +76,36 @@ describe('fleetStats', () => {
 
   it('handles an empty fleet', () => {
     expect(fleetStats([])).toEqual({ count: 0, avgSpeedKmh: 0, lowBattery: 0 });
+  });
+});
+
+describe('sortVehicles', () => {
+  const fleet = [
+    vehicle('v-10', { speed_kmh: 30 }),
+    vehicle('v-2', { speed_kmh: 55.5 }),
+    vehicle('v-1', { speed_kmh: 30 }),
+    vehicle('v-3', { speed_kmh: 0 }),
+  ];
+  const ids = (list: VehicleState[]) => list.map((v) => v.vehicle_id);
+
+  it('sorts by speed ascending and descending', () => {
+    expect(ids(sortVehicles(fleet, 'speed', 'asc'))).toEqual(['v-3', 'v-1', 'v-10', 'v-2']);
+    expect(ids(sortVehicles(fleet, 'speed', 'desc'))).toEqual(['v-2', 'v-1', 'v-10', 'v-3']);
+  });
+
+  it('sorts by vehicle id numerically in both directions', () => {
+    expect(ids(sortVehicles(fleet, 'id', 'asc'))).toEqual(['v-1', 'v-2', 'v-3', 'v-10']);
+    expect(ids(sortVehicles(fleet, 'id', 'desc'))).toEqual(['v-10', 'v-3', 'v-2', 'v-1']);
+  });
+
+  it('does not mutate its input', () => {
+    const before = ids(fleet);
+    sortVehicles(fleet, 'speed', 'desc');
+    expect(ids(fleet)).toEqual(before);
+  });
+
+  it('handles an empty fleet', () => {
+    expect(sortVehicles([], 'speed', 'asc')).toEqual([]);
   });
 });
 

@@ -1,14 +1,16 @@
-import { memo } from 'react';
+import { memo, useState } from 'react';
 import { Line, LineChart, ResponsiveContainer, Tooltip, YAxis } from 'recharts';
 import type { StreamStatus } from '../hooks/useVehicleStream';
 import type { Sample } from '../hooks/useSampledHistory';
-import type { FleetStats } from '../lib/fleet';
+import type { FleetStats, TrackedVehicle } from '../lib/fleet';
+import { SpeedDialog } from './SpeedDialog';
 
 /** The stream's health while a simulation runs; otherwise where the simulation is. */
 export type FeedStatus = StreamStatus | 'idle' | 'stopping' | 'cleaning';
 
 interface MetricsPanelProps {
   stats: FleetStats;
+  vehicles: readonly TrackedVehicle[];
   speedHistory: Sample[];
   status: FeedStatus;
   connectMs: number | null;
@@ -66,7 +68,8 @@ const SpeedChart = memo(function SpeedChart({ history }: { history: Sample[] }) 
 });
 
 export function MetricsPanel(props: MetricsPanelProps) {
-  const { stats, speedHistory, status, connectMs, updatesPerSec, fps } = props;
+  const { stats, vehicles, speedHistory, status, connectMs, updatesPerSec, fps } = props;
+  const [showSpeeds, setShowSpeeds] = useState(false);
 
   return (
     <section className="panel metrics" aria-label="Fleet metrics">
@@ -79,10 +82,21 @@ export function MetricsPanel(props: MetricsPanelProps) {
 
       <div className="stats">
         <Stat label="active vehicles" value={String(stats.count)} testId="vehicle-count" />
-        <Stat label="avg speed km/h" value={stats.avgSpeedKmh.toFixed(1)} testId="avg-speed" />
+        <button
+          type="button"
+          className="stat stat-button"
+          onClick={() => setShowSpeeds(true)}
+          disabled={stats.count === 0}
+          data-testid="open-speeds"
+        >
+          <span className="stat-value">View</span>
+          <span className="stat-label">speed per vehicle</span>
+        </button>
         <Stat label="updates / s" value={String(updatesPerSec)} />
         <Stat label="FPS" value={String(fps)} testId="fps" />
       </div>
+
+      {showSpeeds && <SpeedDialog vehicles={vehicles} onClose={() => setShowSpeeds(false)} />}
 
       <SpeedChart history={speedHistory} />
 

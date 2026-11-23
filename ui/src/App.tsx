@@ -49,6 +49,7 @@ export default function App() {
         <SimulationPanel simulation={simulation} />
         <MetricsPanel
           stats={stats}
+          vehicles={vehicles}
           speedHistory={speedHistory}
           status={feedStatus}
           connectMs={stream.connectMs}
