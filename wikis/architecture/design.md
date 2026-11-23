@@ -66,7 +66,7 @@ flowchart TD
 ## 🧩 Component Breakdown
 
 ### 1. Ingestion: Synthetic Telemetry Generator
-* **Role:** Simulates up to 200 vehicles driving on land inside Mumbai. It idles until a simulation is started (see [Simulation Lifecycle](#7-simulation-lifecycle)); the fleet size, message interval, and chaos rate come from that request.
+* **Role:** Simulates up to 200 vehicles driving on land inside Mumbai. Each vehicle follows a simple kinematic model: speed eases toward a target (0-50 km/h, mostly 5-25) with limited acceleration and braking, the heading drifts, and every ping moves the vehicle `speed x elapsed time` times `MAP_DISTANCE_SCALE` (10, presentation only) from the previous position, so hops are visible on the map. The reported speed is the true speed. Battery drains with the true distance and time, not per ping. It idles until a simulation is started (see [Simulation Lifecycle](#7-simulation-lifecycle)); the fleet size, message interval, and chaos rate come from that request.
 * **Chaos Engineering:** Intentionally drops timestamps, malforms JSON, or corrupts schema types for 0-5% of events (a whole-number percentage chosen per simulation) to test pipeline resilience.
 * **Protocol:** Produces messages to Redpanda via the Kafka wire protocol.
 

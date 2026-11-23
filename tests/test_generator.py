@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import math
+import random
 import time
 from collections import Counter
 
@@ -31,8 +33,7 @@ def produce_batch(g, n: int) -> list[tuple[str, str, bool]]:
 def test_clean_payloads_match_schema(gen):
     for _, message, is_chaos in produce_batch(make_generator(gen, chaos=0), 2000):
         assert not is_chaos
-        payload = gen.TelemetryPayload.model_validate_json(message)
-        assert gen.on_land(payload.lat, payload.lon)
+        gen.TelemetryPayload.model_validate_json(message)
 
 
 def test_land_polygon_excludes_the_sea(gen):
@@ -43,12 +44,121 @@ def test_land_polygon_excludes_the_sea(gen):
     assert not gen.on_land(18.95, 72.90)  # Mumbai Harbour
 
 
-def test_vehicles_stay_on_land(gen):
-    g = make_generator(gen, chaos=0)
-    for _ in range(50):
+@pytest.mark.parametrize('interval', [0.2, 2.0])
+def test_vehicles_stay_on_land(gen, interval):
+    g = make_generator(gen, chaos=0, interval=interval)
+    for _ in range(300):
         for vid, state in g.vehicles.items():
             payload = g.generate_payload(vid, state)
-            assert gen.on_land(payload['lat'], payload['lon'])
+            assert gen.on_land(state['lat'], state['lon'])
+            # Payloads round to 1e-6 degrees (~0.1 m), so a vehicle hugging the
+            # shore may print a coordinate a hair outside the polygon.
+            assert payload['lat'] == pytest.approx(state['lat'], abs=1e-6)
+            assert payload['lon'] == pytest.approx(state['lon'], abs=1e-6)
+
+
+# -- motion -------------------------------------------------------------------
+
+
+def metres_between(a: dict, b: dict) -> float:
+    mean_lat = math.radians((a['lat'] + b['lat']) / 2)
+    north = (b['lat'] - a['lat']) * 111_320
+    east = (b['lon'] - a['lon']) * 111_320 * math.cos(mean_lat)
+    return math.hypot(north, east)
+
+
+def drive(g, dt: float, seconds: float) -> list[tuple[dict, dict]]:
+    """Step every vehicle for `seconds` of simulated time; return (before, after) per step."""
+    steps = []
+    for _ in range(round(seconds / dt)):
+        for vid, state in g.vehicles.items():
+            before = dict(state)
+            g.generate_payload(vid, state, dt=dt)
+            steps.append((before, dict(state)))
+    return steps
+
+
+@pytest.mark.parametrize('dt', [0.1, 0.2, 1.0, 2.0])
+def test_distance_matches_speed_times_time_times_the_map_scale(gen, dt):
+    random.seed(7)
+    g = make_generator(gen, vehicles=50, interval=dt)
+    for before, after in drive(g, dt, seconds=60):
+        mean_speed = (before['speed_kmh'] + after['speed_kmh']) / 2 / 3.6
+        expected = mean_speed * dt * gen.MAP_DISTANCE_SCALE
+        assert metres_between(before, after) == pytest.approx(expected, rel=0.01, abs=0.01)
+
+
+def test_hop_length_scales_with_the_interval(gen):
+    random.seed(11)
+
+    def mean_hop(dt: float) -> float:
+        g = make_generator(gen, vehicles=100, interval=dt)
+        steps = drive(g, dt, seconds=60)
+        return sum(metres_between(b, a) for b, a in steps) / len(steps)
+
+    short, long = mean_hop(0.2), mean_hop(2.0)
+    scale = gen.MAP_DISTANCE_SCALE
+    assert 0.5 * scale < short < 2 * scale  # ~1 m per 0.2 s ping, times the map scale
+    assert 5 * scale < long < 20 * scale  # ... and ten times that per 2 s ping
+    assert 7 < long / short < 13
+
+
+def test_speed_changes_gradually(gen):
+    random.seed(3)
+    g = make_generator(gen, vehicles=50, interval=0.2)
+    top = 0.0
+    for before, after in drive(g, 0.2, seconds=120):
+        top = max(top, after['speed_kmh'])
+        assert abs(after['speed_kmh'] - before['speed_kmh']) <= gen.BRAKE_MS2 * 0.2 * 3.6 + 1e-9
+    assert top <= 50 + 1e-9
+
+
+def test_a_fleet_has_both_parked_and_moving_vehicles(gen):
+    random.seed(5)
+    g = make_generator(gen, vehicles=200, interval=1.0)
+    drive(g, 1.0, seconds=60)
+    speeds = [state['speed_kmh'] for state in g.vehicles.values()]
+    assert any(speed == 0 for speed in speeds)
+    assert any(speed > 30 for speed in speeds)
+
+
+def test_battery_drains_slowly_whatever_the_interval(gen):
+    drops = []
+    for dt in (0.2, 2.0):
+        random.seed(13)
+        g = make_generator(gen, vehicles=20, interval=dt)
+        start = [state['battery_pct'] for state in g.vehicles.values()]
+        drive(g, dt, seconds=120)
+        drops.append(
+            [s - state['battery_pct'] for s, state in zip(start, g.vehicles.values(), strict=True)]
+        )
+    for per_vehicle in drops:
+        # 0.4% per km of true distance: a vehicle drives ~2 km in 2 min at most, so < 1% drop.
+        assert all(0 <= drop < 1 for drop in per_vehicle)
+    assert sum(drops[0]) / 20 == pytest.approx(sum(drops[1]) / 20, abs=0.15)
+
+
+def test_zero_elapsed_time_moves_nothing(gen):
+    g = make_generator(gen, vehicles=1)
+    state = g.vehicles['v-001']
+    before = dict(state)
+    gen.advance_vehicle(state, 0)
+    assert state == before
+
+
+def test_a_boxed_in_vehicle_brakes_to_a_halt_where_it_is(gen, monkeypatch):
+    g = make_generator(gen, vehicles=1, interval=1.0)
+    state = g.vehicles['v-001']
+    state.update(speed_kmh=40.0, target_kmh=40.0)
+    where = (state['lat'], state['lon'])
+    monkeypatch.setattr(gen, 'on_land', lambda lat, lon: False)
+
+    gen.advance_vehicle(state, 1.0)
+    assert 0 < state['speed_kmh'] < 40  # braking, not an instant stop
+    for _ in range(10):
+        gen.advance_vehicle(state, 1.0)
+    assert (state['lat'], state['lon']) == where
+    assert state['speed_kmh'] == 0
 
 
 def test_clean_payload_has_documented_shape(gen):

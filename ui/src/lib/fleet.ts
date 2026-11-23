@@ -121,8 +121,11 @@ const SLOW: Rgb = [239, 68, 68];
 const CRUISE: Rgb = [250, 204, 21];
 const FAST: Rgb = [34, 197, 94];
 
-/** Red when stopped, yellow around 40 km/h, green from 80 km/h. */
+/** City traffic tops out around 50 km/h, so that is where the scale ends. */
+const FAST_KMH = 50;
+
+/** Red when stopped, yellow at half of FAST_KMH (25 km/h), green from 50 km/h. */
 export function speedColor(speedKmh: number): Rgb {
-  const t = Math.min(Math.max(speedKmh / 80, 0), 1);
+  const t = Math.min(Math.max(speedKmh / FAST_KMH, 0), 1);
   return t < 0.5 ? lerp(SLOW, CRUISE, t * 2) : lerp(CRUISE, FAST, (t - 0.5) * 2);
 }

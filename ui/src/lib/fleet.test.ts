@@ -112,9 +112,9 @@ describe('sortVehicles', () => {
 describe('colors', () => {
   it('maps speed from red through yellow to green and clamps', () => {
     expect(speedColor(0)).toEqual([239, 68, 68]);
-    expect(speedColor(40)).toEqual([250, 204, 21]);
-    expect(speedColor(80)).toEqual([34, 197, 94]);
+    expect(speedColor(25)).toEqual([250, 204, 21]);
+    expect(speedColor(50)).toEqual([34, 197, 94]);
     expect(speedColor(-5)).toEqual(speedColor(0));
-    expect(speedColor(500)).toEqual(speedColor(80));
+    expect(speedColor(500)).toEqual(speedColor(50));
   });
 });

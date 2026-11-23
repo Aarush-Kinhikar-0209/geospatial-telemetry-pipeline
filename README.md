@@ -106,6 +106,8 @@ Nothing is generated until you start a simulation. The **Simulation** panel take
 
 **Start simulation** runs the fleet for 2 minutes (`SIMULATION_DURATION_SECONDS`) with a countdown. Out-of-range input is flagged in the form and rejected by the API (`422`). Only one simulation runs at a time (`409` otherwise). **Stop & clear data** ends a run early.
 
+**How far vehicles move per ping.** Each ping moves a vehicle by its speed times the interval, multiplied by `MAP_DISTANCE_SCALE` (10 in `generator/main.py`). The scale is presentation only: it makes hops visible on a city-wide map, at the cost of the moved distance no longer matching the reported speed exactly. At 10×, a vehicle in city traffic (5–25 km/h) hops about 1–14 m per ping at a 0.1–0.2 s interval and about 30–140 m at 2 s. The reported speed and battery drain use the true distance, not the scaled one. Set `MAP_DISTANCE_SCALE = 1` in `generator/main.py` for real-world spacing.
+
 When a run ends, **every trace of it is deleted** before a new one can start:
 
 | Store | What is cleared |

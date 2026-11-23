@@ -4,6 +4,8 @@ Phase 2: Synthetic Telemetry Generator
 
 Simulates a fleet of delivery vehicles moving on land inside Mumbai,
 generating JSON telemetry, and streaming it into Redpanda (Kafka-compatible).
+Vehicles drive at city speeds. Each ping moves a vehicle by its speed times the
+elapsed time, scaled by MAP_DISTANCE_SCALE so hops are visible on the map.
 
 The generator is a controllable service. It stays idle until the API starts a
 simulation by writing the run (vehicle count, interval, chaos rate, deadline)
@@ -22,6 +24,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import os
 import random
 import signal
@@ -174,6 +177,84 @@ def random_land_point() -> tuple[float, float]:
     raise RuntimeError('failed to place a point inside the Mumbai land polygon')
 
 
+# ---------------------------------------------------------------------------
+# Vehicle motion
+#
+# A vehicle's speed and the distance between its pings agree: each step moves
+# it `speed x elapsed time`, so a 0.2 s interval gives centimetre-to-metre hops
+# and a 2 s interval gives several metres, from the same speed.
+# ---------------------------------------------------------------------------
+METERS_PER_DEG_LAT: float = 111_320.0
+# Presentation only: each ping moves the vehicle this many times its true distance
+# (speed x time), so hops are visible on a city-wide map. The speed a vehicle
+# reports is not scaled, and battery drain uses the true distance.
+MAP_DISTANCE_SCALE: float = 10.0
+ACCEL_MS2: float = 1.5  # pulling away in traffic
+BRAKE_MS2: float = 3.0  # braking is firmer than accelerating
+TARGET_CHANGE_PER_S: float = 0.1  # a driver picks a new target speed every ~10 s
+TURN_STD_DEG_PER_SQRT_S: float = 12.0  # heading wander; grows with sqrt(time), not per ping
+BATTERY_PCT_PER_KM: float = 0.4
+BATTERY_PCT_PER_HOUR: float = 1.0  # electronics draw while parked or crawling
+
+
+def pick_target_speed() -> float:
+    """Speed (km/h) a driver settles at next: mostly congested Mumbai streets."""
+    roll = random.random()
+    if roll < 0.15:
+        return 0.0  # waiting at a signal or a pickup
+    if roll < 0.85:
+        return random.uniform(5, 25)  # congested streets
+    return random.uniform(25, 50)  # open roads and flyovers
+
+
+def advance_vehicle(state: dict, dt: float) -> None:
+    """
+    Move a vehicle forward `dt` seconds, in place.
+
+    Speed eases toward a target (acceleration limited), the heading drifts, and
+    the true distance covered is the mean speed over the step times `dt`; the map
+    moves the vehicle MAP_DISTANCE_SCALE times that far. A step that
+    would leave the land polygon is retried after turning around or sideways; if
+    every try fails the vehicle brakes to a halt where it is.
+    """
+    if dt <= 0:
+        return
+
+    if random.random() < 1 - math.exp(-TARGET_CHANGE_PER_S * dt):
+        state['target_kmh'] = pick_target_speed()
+
+    old = state['speed_kmh'] / 3.6  # m/s
+    target = state['target_kmh'] / 3.6
+    if target > old:
+        new = min(target, old + ACCEL_MS2 * dt)
+    else:
+        new = max(target, old - BRAKE_MS2 * dt)
+    distance = (old + new) / 2 * dt
+
+    if distance > 0:
+        state['heading_deg'] = (
+            state['heading_deg'] + random.gauss(0, TURN_STD_DEG_PER_SQRT_S * math.sqrt(dt))
+        ) % 360
+        ahead = state['heading_deg']
+        turn_around = (ahead + 180 + random.uniform(-45, 45)) % 360
+        step = distance * MAP_DISTANCE_SCALE
+        for heading in (ahead, turn_around, (ahead + 90) % 360, (ahead - 90) % 360):
+            radians = math.radians(heading)
+            lat = state['lat'] + step * math.cos(radians) / METERS_PER_DEG_LAT
+            lon = state['lon'] + step * math.sin(radians) / (
+                METERS_PER_DEG_LAT * math.cos(math.radians(state['lat']))
+            )
+            if on_land(lat, lon):
+                state['lat'], state['lon'], state['heading_deg'] = lat, lon, heading
+                break
+        else:
+            new, distance = max(0.0, old - BRAKE_MS2 * dt), 0.0  # boxed in: brake, stay put
+
+    state['speed_kmh'] = new * 3.6
+    drain = BATTERY_PCT_PER_KM * distance / 1000 + BATTERY_PCT_PER_HOUR * dt / 3600
+    state['battery_pct'] = max(0.0, state['battery_pct'] - drain)
+
+
 def chaos_block(chaos_percent: float) -> list[bool]:
     """
     A shuffled block of messages in which exactly `chaos_percent` are chaos.
@@ -268,11 +349,14 @@ class TelemetryGenerator:
         for i in range(self.config.vehicles):
             vid = f'v-{i + 1:03d}'
             lat, lon = random_land_point()
+            target = pick_target_speed()
             self.vehicles[vid] = {
                 'lat': lat,
                 'lon': lon,
-                'speed_kmh': random.uniform(0, 80),
-                'battery_pct': random.randint(20, 100),
+                'heading_deg': random.uniform(0, 360),
+                'speed_kmh': target,
+                'target_kmh': target,
+                'battery_pct': float(random.randint(10, 100)),
             }
 
     def start_tasks(self) -> None:
@@ -308,19 +392,17 @@ class TelemetryGenerator:
 
     # -- payload generation -------------------------------------------------
 
-    def generate_payload(self, vehicle_id: str, state: dict) -> dict:
-        """Advance a vehicle's random walk and build a clean payload."""
+    def generate_payload(self, vehicle_id: str, state: dict, dt: float | None = None) -> dict:
+        """
+        Advance a vehicle by `dt` seconds (default: the message interval) and
+        build a clean payload for where it ended up.
+        """
         now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
-        # Random walk that stays inside the land polygon. A step into the sea
-        # is discarded, so the vehicle holds its last on-land position.
-        lat = state['lat'] + random.uniform(-0.005, 0.005)
-        lon = state['lon'] + random.uniform(-0.005, 0.005)
-        if on_land(lat, lon):
-            state['lat'] = lat
-            state['lon'] = lon
-        state['speed_kmh'] = max(0, min(120, state['speed_kmh'] + random.uniform(-5, 5)))
-        state['battery_pct'] = max(0, min(100, state['battery_pct'] + random.randint(-1, 1)))
+        if dt is None:
+            assert self.config is not None
+            dt = self.config.interval
+        advance_vehicle(state, dt)
 
         return {
             'vehicle_id': vehicle_id,
@@ -328,7 +410,7 @@ class TelemetryGenerator:
             'lat': round(state['lat'], 6),
             'lon': round(state['lon'], 6),
             'speed_kmh': round(state['speed_kmh'], 2),
-            'battery_pct': state['battery_pct'],
+            'battery_pct': round(state['battery_pct']),
         }
 
     def inject_chaos(self, payload: dict) -> tuple:
@@ -396,9 +478,15 @@ class TelemetryGenerator:
         state = self.vehicles[vehicle_id]
         # Spread the vehicles across one interval so messages arrive evenly
         # instead of in a burst from the whole fleet every `interval` seconds.
+        loop = asyncio.get_running_loop()
+        last = loop.time()
         await asyncio.sleep(random.uniform(0, interval))
         while True:
-            payload = self.generate_payload(vehicle_id, state)
+            # Move by the time that really passed, so a slow event loop shows up
+            # as a longer hop, not as a vehicle that is slower than its speed.
+            now = loop.time()
+            payload = self.generate_payload(vehicle_id, state, dt=now - last)
+            last = now
             corrupted, is_chaos = self.inject_chaos(payload)
             try:
                 await self.produce(corrupted, is_chaos)
